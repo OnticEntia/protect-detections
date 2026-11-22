@@ -255,6 +255,7 @@ const STYLE = `
   .boxes { position: absolute; pointer-events: none; }
   .box { position: absolute; box-sizing: border-box; border: calc(2px * var(--k, 1)) solid var(--c, #fff); border-radius: calc(3px * var(--k, 1));
     pointer-events: auto; }
+  .box.part { border-width: calc(1.5px * var(--k, 1)); border-radius: 50% / 45%; pointer-events: none; }
   .box.other { border-style: dashed; border-width: calc(1px * var(--k, 1)); opacity: .6; pointer-events: none; }
   .box.picked { box-shadow: 0 0 0 calc(1px * var(--k, 1)) #fff; }
   /* standing by: the words, small, along the bottom */
@@ -770,16 +771,26 @@ class ProtectTrackingCard extends HTMLElement {
     }
     sub.lt.message(msg);
     const types = this._config.types;
-    const hit = (msg.tracks || []).find((tr) => tr && types.includes(tr.objectType));
+    // (a face found on someone being followed is part of them, not a thing of its own)
+    const own = (msg.tracks || []).filter((tr) => tr && tr.of == null);
+    const hit = own.find((tr) => types.includes(tr.objectType));
+    const now = Date.now();
     if (!hit) {
-      if (this._config.show_others && !this._active) this._blips(msg.tracks || []);
+      // (messages can come thirty a second: the dots needn't)
+      if (this._config.show_others && !this._active && now - (this._blipAt || 0) >= 200) {
+        this._blipAt = now;
+        this._blips(own);
+      }
       return;
     }
-    sub.matchAt = Date.now();
-    this._lastSeen = sub.matchAt;
-    try {
-      localStorage.setItem(LAST_KEY + this._lastKey(), String(sub.matchAt));
-    } catch (e) {}
+    sub.matchAt = now;
+    this._lastSeen = now;
+    if (now - (this._lastSaved || 0) >= 5000) {
+      this._lastSaved = now;
+      try {
+        localStorage.setItem(LAST_KEY + this._lastKey(), String(now));
+      } catch (e) {}
+    }
     if (!this._active) this._enter(sub, hit.coord);
   }
 
@@ -938,8 +949,12 @@ class ProtectTrackingCard extends HTMLElement {
     const now = Date.now();
     const behind = lt.behind(a.stream, { delay: cfg.live_delay, offset: cfg.live_offset, debug: !!cfg.live_debug });
     const all = lt.visible(lt.moment(behind), true);
-    const mine = all.filter((n) => cfg.types.includes(n.t.type)); // (standing still counts too)
-    const others = cfg.show_others ? all.filter((n) => !cfg.types.includes(n.t.type) && lt.moment(behind) - n.t.moved <= 5000) : [];
+    const whole = all.filter((n) => n.of == null);
+    const mine = whole.filter((n) => cfg.types.includes(n.t.type)); // (standing still counts too)
+    const others = cfg.show_others ? whole.filter((n) => !cfg.types.includes(n.t.type) && lt.moment(behind) - n.t.moved <= 5000) : [];
+    // faces found on those drawn: boxed with them, never followed or counted by themselves
+    const drawn = new Set([...mine, ...others].map((n) => String(n.t.id)));
+    const parts = all.filter((n) => n.of != null && drawn.has(n.of));
     if (mine.length) a.seen = now;
 
     // gone for good: back to standing by (a new report keeps it going)
@@ -988,7 +1003,7 @@ class ProtectTrackingCard extends HTMLElement {
     const layer = root.querySelector(".boxes");
     layer.style.cssText = `left:${place[0].toFixed(1)}px;top:${place[1].toFixed(1)}px;width:${place[2].toFixed(1)}px;height:${place[3].toFixed(1)}px;--k:${(1 / (a.view.s || 1)).toFixed(4)}`;
     const keep = new Set();
-    for (const n of [...mine, ...others]) {
+    for (const n of [...mine, ...others, ...parts]) {
       const { t, box } = n;
       keep.add(t.id);
       let el = a.els.get(t.id);
@@ -1002,8 +1017,8 @@ class ProtectTrackingCard extends HTMLElement {
         layer.appendChild(el);
         a.els.set(t.id, el);
       }
-      const other = !cfg.types.includes(t.type);
-      el.className = `box${other ? " other" : ""}${a.pick === t.id ? " picked" : ""}`;
+      const other = n.of == null && !cfg.types.includes(t.type);
+      el.className = `box${other ? " other" : ""}${n.of != null ? " part" : ""}${a.pick === t.id ? " picked" : ""}`;
       el.style.cssText = `left:${(box[0] / 10).toFixed(2)}%;top:${(box[1] / 10).toFixed(2)}%;width:${(box[2] / 10).toFixed(2)}%;height:${(box[3] / 10).toFixed(2)}%;--c:${LIVE_COLORS[t.type] || "#e5e7eb"}`;
     }
     for (const [id, el] of a.els) {

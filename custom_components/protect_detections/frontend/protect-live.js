@@ -37,7 +37,10 @@
 
 export const LIVE_COLORS = { person: "#ff2d55", vehicle: "#4ea8ff", animal: "#34d399", package: "#fbbf24", licensePlate: "#c084fc", face: "#f472b6" };
 export const LIVE_DELAY_MS = 700; // how far the picture is held back so the positions can keep up with it
-const LIVE_TRANSIT_MS = 330; // the quickest a position gets here after its moment (measured)
+const LIVE_TRANSIT_MS = 330; // the quickest a position of Protect's gets here after its moment (measured)
+const LIVE_LOCAL_TRANSIT_MS = -35; // and one of Protect Tracker's: stamped as Protect would, it is here a little before that moment
+const LIVE_GAP_KEEP_S = 30; // "of late", for the quickest message
+const LIVE_SOURCE_MS = 2000; // positions count as local while one made locally came this recently
 // By the camera's stream (0: main, others: the lighter ones), measured:
 const LIVE_STAMP_MS = [-125, -125]; // a frame's timestamp, against the clock its positions carry (minus: the positions' is later). Measured on both: about -125 on the main stream, about -113 on the second
 const LIVE_WEBRTC_BASE_MS = [0, 0]; // a position's moment to its frame on screen, without any held-back time (the same figures, said for the estimate)
@@ -191,9 +194,9 @@ export function pictureBox(el, r = el.getBoundingClientRect()) {
  */
 export class LiveTracks {
   constructor() {
-    this.tracks = new Map(); // id -> {id, type, desc, confidence, zones, loiterZones, lines, pts: [[moment, x, y, w, h]], moved}
-    this.gaps = [];
-    this.gap = null; // our clock minus the camera's, at best
+    this.tracks = new Map(); // id -> {id, type, desc, confidence, zones, loiterZones, lines, pts: [[moment, x, y, w, h]], moved, local, of}
+    this.quick = { protect: new Map(), local: new Map() }; // per second of late: the quickest message of each make
+    this.gap = null; // our clock minus the camera's, plus what Protect's quickest message takes
     this.jb = null; // ms of picture the browser really holds (WebRTC)
     this.stats = null;
     this.statsAt = 0;
@@ -205,30 +208,47 @@ export class LiveTracks {
     this.sync = "estimate"; // or "rtp": how the moment on screen was found
     this.lag = null; // (rtp) the frame on screen is this far behind the newest positions
     this.channel = 1;
-    this.source = null; // what the newest positions were made by, where the sender says: "local" | "protect"
+    this.said = false; // do the messages say who made their positions
+    this.localAt = 0; // when (our clock) a locally made one last came
     this.debug = false; // (live_debug) also check the timing against the picture
     this.fit = null; // {sum: per step, n, queue: frames waiting to be judged}
   }
 
   message(msg) {
     if (!msg || msg.status || !Number.isFinite(msg.clockWall)) return;
-    // our clock against the camera's: the quickest of the last messages
-    this.gaps.push(Date.now() - msg.clockWall);
-    if (this.gaps.length > 120) this.gaps.shift();
-    this.gap = Math.min(...this.gaps);
-    if (msg.source === "local" || msg.source === "protect") this.source = msg.source;
+    const now = Date.now();
+    const local = msg.source === "local";
+    if (local || msg.source === "protect") this.said = true;
+    if (local) this.localAt = now;
+    // Our clock against the camera's: from the quickest message of the last
+    // half minute. Protect's own take a third of a second at best; Protect
+    // Tracker's are here at once, so each make is counted for itself and
+    // Protect's is gone by while there are any.
+    const mine = this.quick[local ? "local" : "protect"];
+    const sec = Math.floor(now / 1000);
+    const took = now - msg.clockWall;
+    if (!mine.has(sec) || took < mine.get(sec)) mine.set(sec, took);
+    for (const list of [this.quick.protect, this.quick.local]) for (const k of list.keys()) if (k < sec - LIVE_GAP_KEEP_S) list.delete(k);
+    this.gap = this.quick.protect.size ? Math.min(...this.quick.protect.values()) : Math.min(...this.quick.local.values()) - LIVE_LOCAL_TRANSIT_MS + LIVE_TRANSIT_MS;
+    // (the newest stamp only: Protect's messages come later than Protect Tracker's, with older ones)
     const rate = Number(msg.clockStreamRate) || 1000;
-    if (Number.isFinite(msg.clockStream)) this.clock = { wall: msg.clockWall, stream: (msg.clockStream * 1000) / rate, at: Date.now() };
+    if (Number.isFinite(msg.clockStream) && (!this.clock || msg.clockWall - now >= this.clock.wall - this.clock.at - 50)) {
+      this.clock = { wall: msg.clockWall, stream: (msg.clockStream * 1000) / rate, at: now };
+    }
     for (const tr of msg.tracks || []) {
       if (!tr || !Array.isArray(tr.coord) || tr.coord.length !== 4) continue;
       let t = this.tracks.get(tr.id);
       if (!t) this.tracks.set(tr.id, (t = { id: tr.id, type: tr.objectType || "object", desc: "", pts: [], moved: 0 }));
       if (tr.objectType) t.type = tr.objectType;
       if (tr.desc) t.desc = tr.desc;
-      t.local = tr.local === true; // (made by Protect Tracker's own model)
+      // made by Protect Tracker's own model (Protect's own reports of the same thing come in between: it stays so)
+      if (tr.local === true) t.localAt = msg.clockWall;
+      t.local = t.localAt != null && msg.clockWall - t.localAt < LIVE_SOURCE_MS;
+      // (a face found on someone being followed belongs to that someone: `of` is their id)
+      t.of = tr.of != null && tr.of !== "" ? String(tr.of) : null;
       if (Number.isFinite(tr.confidence)) t.confidence = tr.confidence;
       for (const key of ["zones", "loiterZones", "lines"]) if (Array.isArray(tr[key])) t[key] = tr[key];
-      if (!tr.stationary) t.moved = msg.clockWall;
+      if (!tr.stationary && msg.clockWall > t.moved) t.moved = msg.clockWall;
       const last = t.pts[t.pts.length - 1];
       if (last && last[0] >= msg.clockWall) continue;
       t.pts.push([msg.clockWall, ...tr.coord.map(Number)]);
@@ -511,15 +531,38 @@ export class LiveTracks {
     return this.gap == null ? null : Date.now() - this.gap + LIVE_TRANSIT_MS - behind;
   }
 
+  // Who makes the positions now, where the sender says: "local" (Protect
+  // Tracker's own, of late) | "protect" | null. Both kinds come mixed, so it
+  // is "local" while any local one came in the last moments.
+  get source() {
+    return !this.said ? null : Date.now() - this.localAt < LIVE_SOURCE_MS ? "local" : "protect";
+  }
+
   // The things in view at the camera's moment `at`: [{t, box: [x, y, w, h]}].
   // Parked ones (not moved for a while) are left out unless `parked`.
+  // Something that belongs to another thing (a face found on a person being
+  // followed) is there only with it, and comes marked: {t, box, of}.
   visible(at, parked = false) {
     const out = [];
     if (at == null) return out;
+    const seen = new Set();
+    const parts = [];
     for (const t of this.tracks.values()) {
+      if (t.of != null) {
+        parts.push(t);
+        continue;
+      }
       if (!parked && at - t.moved > LIVE_PARKED_MS) continue;
       const box = LiveTracks.at(t, at);
-      if (box) out.push({ t, box });
+      if (box) {
+        out.push({ t, box });
+        seen.add(String(t.id));
+      }
+    }
+    for (const t of parts) {
+      if (!seen.has(t.of)) continue;
+      const box = LiveTracks.at(t, at);
+      if (box) out.push({ t, box, of: t.of });
     }
     return out;
   }

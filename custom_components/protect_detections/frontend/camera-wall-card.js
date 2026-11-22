@@ -342,6 +342,8 @@ const LIVE_STYLE = `
   .ldebug[hidden] { display: none; }
   .lbox-it { position: absolute; box-sizing: border-box; border: calc(2px * var(--k, 1)) solid var(--c, #fff); border-radius: calc(3px * var(--k, 1));
     pointer-events: none; }
+  .lbox-it.part { border-width: calc(1.5px * var(--k, 1)); border-radius: 50% / 45%; }
+  .lbox-it.part span { display: none; }
   .lbox-it span { position: absolute; left: 0; bottom: 100%; margin-bottom: 3px; white-space: nowrap; font-size: 12px; font-weight: 600; color: #fff;
     padding: 2px 6px; border-radius: 4px; background: color-mix(in srgb, var(--c, #fff) 70%, #000 30%); transform: scale(var(--k, 1)); transform-origin: 0 100%; }
   .lbox-it span.below { bottom: auto; top: 100%; margin: 3px 0 0; transform-origin: 0 0; }
@@ -2906,7 +2908,7 @@ class CameraWallCard extends HTMLElement {
     const keep = new Set();
     if (place) {
       layer.style.cssText = `left:${place[0].toFixed(1)}px;top:${place[1].toFixed(1)}px;width:${place[2].toFixed(1)}px;height:${place[3].toFixed(1)}px;--k:${(1 / ((this._zoom && this._zoom.s) || 1)).toFixed(4)}`;
-      for (const { t, box } of now) {
+      for (const { t, box, of } of now) {
         keep.add(t.id);
         let el = lt.els.get(t.id);
         if (!el) {
@@ -2916,7 +2918,9 @@ class CameraWallCard extends HTMLElement {
           layer.appendChild(el);
           lt.els.set(t.id, el);
         }
-        const label = `${t.type.charAt(0).toUpperCase()}${t.type.slice(1)}${t.desc ? ` · ${t.desc}` : ""}`;
+        // (a face found on the person it is drawn with needs no name of its own)
+        const label = of != null ? "" : `${t.type.charAt(0).toUpperCase()}${t.type.slice(1)}${t.desc ? ` · ${t.desc}` : ""}`;
+        el.classList.toggle("part", of != null);
         if (el.firstChild.textContent !== label) el.firstChild.textContent = label;
         el.style.cssText = `left:${(box[0] / 10).toFixed(2)}%;top:${(box[1] / 10).toFixed(2)}%;width:${(box[2] / 10).toFixed(2)}%;height:${(box[3] / 10).toFixed(2)}%;--c:${LIVE_COLORS[t.type] || "#e5e7eb"}`;
         el.firstChild.classList.toggle("below", box[1] < 60);

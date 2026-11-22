@@ -1247,7 +1247,8 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const lt = new ctx.LiveTracks();
   lt.message({ clockWall: 1000, source: "local", tracks: [{ id: "a", coord: [1, 2, 3, 4], objectType: "person", local: true }, { id: "b", coord: [5, 6, 7, 8], objectType: "vehicle" }] });
   ok(lt.source === "local" && lt.tracks.get("a").local === true && lt.tracks.get("b").local === false && /boxes: local \(Protect Tracker\)/.test(lt.describe(0)), "a message says who made its positions, and which things the local model made");
-  lt.message({ clockWall: 1250, source: "protect", tracks: [] }); ok(lt.source === "protect" && /boxes: Protect's/.test(lt.describe(0)), "Protect's, passed on by Protect Tracker: said too");
+  lt.message({ clockWall: 1250, source: "protect", tracks: [] }); ok(lt.source === "local", "one of Protect's in between (they come mixed): still local, the mark doesn't flicker");
+  lt.localAt = Date.now() - 3000; ok(lt.source === "protect" && /boxes: Protect's/.test(lt.describe(0)), "no local ones for a few seconds: Protect's, passed on by Protect Tracker");
   ok(new ctx.LiveTracks().describe(0).indexOf("boxes:") < 0, "this integration's own messages say nothing about it, and nothing is claimed");
 
   // --- thirty reports a second
@@ -1264,6 +1265,37 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(Math.abs(ahead[0] - (100 + 0.01 * (lastC + 300 - C0))) < 6, `past the newest report it carries on at its real pace, the wobble between two frames not blown up (${(ahead[0] - (100 + 0.01 * (lastC + 300 - C0))).toFixed(1)} off)`);
   const t1 = performance.now(); for (let k = 0; k < 6000; k++) fast.visible(lastC - 700 - (k % 500)); ok(performance.now() - t1 < 1500, `looking up where things are, a second or so back, stays cheap (${Math.round(performance.now() - t1)} ms for 6000 frames)`);
 
+  // --- as Protect Tracker really sends them: its own a frame apart and here at once, Protect's four a second and half a second late
+  {
+    const m = new ctx.LiveTracks(); const real2 = Date.now; const B = 1_700_000_100_000; // the camera's clock; ours is 2 s ahead of it
+    const sendAt = (ours, pkt) => { Date.now = () => ours; try { m.message(pkt); } finally { Date.now = real2; } };
+    const pos = (c) => 200 + 0.2 * (c - B); const events = [];
+    for (let c = B; c <= B + 4000; c += 33) events.push([c + 2000 - 25, { clockWall: c, clockStream: c - 7, clockStreamRate: 1000, source: "local", tracks: [{ id: "v", coord: [pos(c), 300, 80, 50], objectType: "vehicle", local: true, stationary: false }] }]);
+    // Protect's own box for the same car sits 4 units off, and comes 450 ms after its stamp
+    for (let c = B + 100; c <= B + 4000; c += 250) events.push([c + 2000 + 450, { clockWall: c, clockStream: c - 7, clockStreamRate: 1000, source: "protect", tracks: [{ id: "v", coord: [pos(c) + 4, 300, 80, 50], objectType: "vehicle", stationary: false }, { id: "parked", coord: [800, 500, 90, 60], objectType: "vehicle", stationary: true }] }]);
+    events.sort((x, y) => x[0] - y[0]); let worst = 0; let back = false; let lastX = null; let lastOurs = 0; let clockBack = false; let lastAbout = -Infinity;
+    for (const [ours, pkt] of events) {
+      sendAt(ours, pkt);
+      const pts = m.tracks.get("v").pts; for (let k = 1; k < pts.length; k++) if (pts[k][0] <= pts[k - 1][0]) back = true;
+      // where the box is drawn, for a picture 300 ms behind the camera, right after each message
+      const box = ctx.LiveTracks.at(m.tracks.get("v"), ours - 2000 - 300); if (box && lastX != null) worst = Math.max(worst, Math.abs(box[0] - lastX - 0.2 * (ours - lastOurs))); if (box) { lastX = box[0]; lastOurs = ours; }
+      const about = m.clock.stream + (ours - m.clock.at); if (about < lastAbout - 60) clockBack = true; lastAbout = Math.max(lastAbout, about);
+    }
+    const pts = m.tracks.get("v").pts;
+    ok(!back && pts.length >= 115 && pts.every((q) => Math.abs(q[1] - pos(q[0])) < 0.01), "mixed packets for one thing: its positions stay in order, and Protect's late ones don't displace the newer local ones");
+    ok(worst < 1, `so the box moves evenly, no jump when one of Protect's arrives (furthest from an even pace between two messages: ${worst.toFixed(2)} units)`);
+    ok(!clockBack, "the stream clock kept is the newest stamp's, not set back by a late packet");
+    ok(Math.abs(m.gap - (2000 + 450)) < 2, "our clock against the camera's is taken from Protect's own packets while there are any (the local ones are here at once)");
+    ok(m.tracks.get("parked").local === false && m.tracks.get("v").local === true, "which things the local model made is kept per thing");
+    // only local packets (nothing of Protect's of late): allowed for
+    const only = new ctx.LiveTracks(); for (let c = B; c <= B + 1000; c += 33) { Date.now = () => c + 2000 - 35; only.message({ clockWall: c, source: "local", tracks: [] }); } Date.now = real2;
+    ok(Math.abs(only.gap - (2000 + 330)) < 2, "only local packets: the same answer, their being here at once allowed for");
+    // faces
+    const f = new ctx.LiveTracks(); const pk = (c, tracks) => f.message({ clockWall: c, source: "local", tracks });
+    for (let c = B; c <= B + 1000; c += 100) pk(c, [{ id: "p1", coord: [400, 300, 80, 240], objectType: "person", local: true }, { id: "p1:face", coord: [425, 310, 30, 40], objectType: "face", of: "p1", local: true }, { id: "p9:face", coord: [100, 100, 30, 40], objectType: "face", of: "p9", local: true }, { id: "f7", coord: [700, 200, 30, 40], objectType: "face" }]);
+    const vis = f.visible(B + 500, true); const ids = vis.map((n) => n.t.id + (n.of ? ">" + n.of : "")).join();
+    ok(ids === "p1,f7,p1:face>p1", "a face found on someone followed comes with them and marked as theirs; one whose person isn't in view is left out; a face Protect reports is a thing as before: " + ids);
+  }
   // --- the tracking card
   const reg = { "camera.p_high_resolution_channel": { device_id: "d1", platform: "unifiprotect" } };
   const states = { "camera.p_high_resolution_channel": { entity_id: "camera.p_high_resolution_channel", state: "recording", attributes: { channel_id: 0 } } };
@@ -1287,11 +1319,30 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(c.conn.open.has(TR) && !c.conn.open.has(PR), "tracking card with Protect Tracker installed: it is used by itself");
   c.conn.open.get(TR)(person({ source: "local" })); c._active.placeAt = 0; c._frame(c._active);
   ok(!!c._active && chip(c).hidden === false && chip(c).textContent === "local", "a person from the local model: followed, marked 'local'");
-  c.conn.open.get(TR)(person({ source: "protect" })); c._active.placeAt = 0; c._frame(c._active);
+  c.conn.open.get(TR)(person({ source: "protect" })); c._active.placeAt = 0; c._frame(c._active); ok(chip(c).textContent === "local", "one of Protect's packets in between: the mark stays");
+  c._active.sub.lt.localAt = Date.now() - 3000; c._active.placeAt = 0; c._frame(c._active);
   ok(chip(c).textContent === "Protect" && /passed on by Protect Tracker/.test(chip(c).title), "Protect Tracker falling back to Protect's positions: marked 'Protect'");
   c._config.live_debug = true; c._active.placeAt = 0; c._frame(c._active); ok(/boxes: Protect's/.test(c._root.querySelector(".dbg").textContent), "and live_debug says it as well");
   c.disconnectedCallback();
   // told by name
+  // faces from Protect Tracker: with their person, never by themselves
+  c = await mkc({}, [TR, PR]); const face = (of) => ({ id: of + ":face", coord: [415, 410, 30, 40], objectType: "face", of, local: true });
+  c.conn.open.get(TR)({ clockWall: Date.now() - 20, source: "local", tracks: [face("p")] });
+  ok(!c._active, "a face by itself (its person not reported): the card stays standing by");
+  ctx.localStorage.store = {}; let writes = 0; const realSet = ctx.localStorage.setItem; ctx.localStorage.setItem = function (k, v) { writes++; return realSet.call(this, k, v); };
+  let plays = 0; c._chime = () => plays++;
+  for (let k = 0; k < 60; k++) c.conn.open.get(TR)({ clockWall: Date.now() - 20 + k, source: "local", tracks: [{ id: "p", coord: [400, 400, 60, 160], objectType: "person", local: true }, face("p")] });
+  ok(!!c._active && plays === 1 && writes === 1, "sixty reports of one person in two seconds' worth: woken once, sounded once, remembered once (not sixty times)");
+  ctx.localStorage.setItem = realSet;
+  { const a = c._active; const real3 = Date.now; const now3 = real3(); Date.now = () => now3 + 300; a.placeAt = 0; a.view.at = 0; try { c._frame(a); } finally { Date.now = real3; }
+    ok(a.els.size === 2 && a.els.get("p").className === "box" && a.els.get("p:face").className === "box part", "the face is boxed with its person");
+    ok(c._root.querySelector(".info").children.length === 1 && /^Person/.test(c._root.querySelector(".info").children[0].textAll), "and is not counted or named as a thing of its own"); }
+  c.disconnectedCallback();
+  c = await mkc({ types: ["face"] }, [TR, PR]); c.conn.open.get(TR)({ clockWall: Date.now() - 20, source: "local", tracks: [{ id: "f7", coord: [400, 400, 30, 40], objectType: "face" }] });
+  ok(!!c._active, "a card told to watch faces still wakes for a face Protect reports"); c.disconnectedCallback();
+  c = await mkc({ show_others: true, types: ["vehicle"] }, [TR, PR]); let blips = 0; const realBlips = c._blips.bind(c); c._blips = (t) => { blips++; return realBlips(t); };
+  for (let k = 0; k < 30; k++) c.conn.open.get(TR)({ clockWall: Date.now() - 20 + k, source: "local", tracks: [{ id: "p", coord: [400, 400, 60, 160], objectType: "person", local: true }, face("p")] });
+  ok(!c._active && blips === 1, "other things as dots while standing by: drawn at a steady pace, not once a packet"); c.disconnectedCallback();
   c = await mkc({ source: "protect" }, [TR, PR]); ok(c.conn.open.has(PR) && !c.conn.open.has(TR), "source: protect leaves Protect Tracker alone");
   c.conn.open.get(PR)(person()); c._active.placeAt = 0; c._frame(c._active); ok(chip(c).hidden === false && chip(c).textContent === "Protect", "and the mark shows the choice made"); c.disconnectedCallback();
   c = await mkc({ source: "local" }, [PR]);
