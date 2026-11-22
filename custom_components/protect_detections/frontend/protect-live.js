@@ -40,6 +40,7 @@ export const LIVE_DELAY_MS = 700; // how far the picture is held back so the pos
 const LIVE_TRANSIT_MS = 330; // the quickest a position of Protect's gets here after its moment (measured)
 const LIVE_LOCAL_TRANSIT_MS = -35; // and one of Protect Tracker's: stamped as Protect would, it is here a little before that moment
 const LIVE_GAP_KEEP_S = 30; // "of late", for the quickest message
+const LIVE_LOCAL_HOLD_MS = 1000; // a thing the local model has: Protect's own positions for it are left aside this long
 const LIVE_SOURCE_MS = 2000; // positions count as local while one made locally came this recently
 // By the camera's stream (0: main, others: the lighter ones), measured:
 const LIVE_STAMP_MS = [-125, -125]; // a frame's timestamp, against the clock its positions carry (minus: the positions' is later). Measured on both: about -125 on the main stream, about -113 on the second
@@ -251,6 +252,9 @@ export class LiveTracks {
       if (!tr.stationary && msg.clockWall > t.moved) t.moved = msg.clockWall;
       const last = t.pts[t.pts.length - 1];
       if (last && last[0] >= msg.clockWall) continue;
+      // (while the local model has a thing, Protect's own box for it is left
+      // aside: the two differ a little, and the box would hop between them)
+      if (tr.local !== true && t.localAt != null && Math.abs(msg.clockWall - t.localAt) < LIVE_LOCAL_HOLD_MS) continue;
       t.pts.push([msg.clockWall, ...tr.coord.map(Number)]);
       while (t.pts.length > 2 && t.pts[0][0] < msg.clockWall - LIVE_KEEP_MS) t.pts.shift();
     }
@@ -542,7 +546,8 @@ export class LiveTracks {
   // Parked ones (not moved for a while) are left out unless `parked`.
   // Something that belongs to another thing (a face found on a person being
   // followed) is there only with it, and comes marked: {t, box, of}.
-  visible(at, parked = false) {
+  // `localOnly`: only what Protect Tracker's own model made.
+  visible(at, parked = false, localOnly = false) {
     const out = [];
     if (at == null) return out;
     const seen = new Set();
@@ -552,6 +557,7 @@ export class LiveTracks {
         parts.push(t);
         continue;
       }
+      if (localOnly && !t.local) continue;
       if (!parked && at - t.moved > LIVE_PARKED_MS) continue;
       const box = LiveTracks.at(t, at);
       if (box) {

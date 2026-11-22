@@ -855,6 +855,74 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(Math.abs(w._ltBehind(hl) - (4200 + 1500)) < 1 && hl.kind === "hls" && hl.can === false, "HLS: nothing to hold back; the boxes are kept and drawn that much later");
   w._liveIndex = null; w._liveStream = null; w.disconnectedCallback(); ctx.localStorage.store = {};
 }
+// --- the live view: whose boxes (Auto / Local / UniFi)
+{
+  ctx.localStorage.store = {};
+  const TR = "protect_tracker/live/subscribe", PR = "protect_detections/live/subscribe";
+  const mkConn = (have) => { const c = { have: new Set(have), open: new Map(), log: [],
+    subscribeMessage(cb, m) { if (!m.type.endsWith("/live/subscribe")) return Promise.resolve(() => {}); c.log.push(m.type); if (!c.have.has(m.type)) return Promise.reject({ code: "unknown_command" }); c.open.set(m.type, cb); return Promise.resolve(() => { c.open.delete(m.type); }); } }; return c; };
+  const realTimeout = ctx.setTimeout; ctx.setTimeout = (f, ms) => (ms >= 100000 ? { held: true } : realTimeout(f, ms)); // (the looking-again for Protect Tracker isn't wanted here)
+  const mk = async (have, cfg = {}) => { const conn = mkConn(have); const w = new Wall(); w.clientWidth = 1000; w.isConnected = true;
+    w.setConfig({ cameras: [{ entity: "camera.a", name: "A" }], alarm: false, history: false, arrange: false, tracking: false, ...cfg });
+    w.hass = { ...hass, entities: {}, devices: {}, connection: conn, callWS: (m) => (m.type === "network/url" ? Promise.resolve({}) : m.type.endsWith("/live/cameras") ? Promise.resolve({ cameras: { "camera.a": "p1" } }) : new Promise(() => {})) };
+    await tick(); await tick(); await tick(); w._openLive(0); await tick(); await tick();
+    const root = w._liveRoot; const vid = Object.assign(new El(), { tagName: "VIDEO", videoWidth: 1920, videoHeight: 1080, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1600, height: 900 }) });
+    w._liveStream = Object.assign(new El(), { querySelectorAll: () => [vid], isConnected: true });
+    for (const q of [".frame", ".zoom"]) root.querySelector(q).getBoundingClientRect = () => ({ left: 0, top: 0, width: 1600, height: 900 });
+    ctx.localStorage.store["camera-wall-card:live-boxes"] = "1"; w._ltSync(); await tick(); await tick(); w.conn = conn; return w; };
+  const chip = (w) => w._liveRoot.querySelector(".lsrc");
+  // the picture is taken as 300 ms behind ("other player"); packets as the tracker sends them
+  const feed = (w, type, tracks, source, shift = 0) => { const real = Date.now; const now = real() + shift; const n = 12;
+    for (let k = 0; k < n; k++) { const c = now - 2000 + k * 100; Date.now = () => c + (source === "local" ? -20 : 400); w.conn.open.get(type)({ clockWall: c, ...(source ? { source } : {}), tracks: tracks(k) }); }
+    Date.now = () => now - 2000 + 800 + (source === "local" ? -20 : 400); try { w._lt.placeAt = 0; w._ltFrame(w._lt); } finally { Date.now = real; } };
+  const car = (id, x, local) => (k) => [{ id, coord: [x + k * 10, 400, 100, 50], objectType: "vehicle", stationary: false, ...(local ? { local: true } : {}) }];
+  const both = (k) => [...car("m", 100, true)(k), ...car("u", 600, false)(k)];
+  const drawn = (w) => [...w._lt.els].map(([id, el]) => id + (el.classList.contains("passed") ? "(dashed)" : "")).sort().join();
+  // no Protect Tracker: nothing new to see
+  let w = await mk([PR]);
+  ok(w._lt.src === "auto" && w.conn.open.has(PR) && chip(w).hidden === true, "live view without Protect Tracker: Protect's boxes, and no chooser to wonder about");
+  feed(w, PR, car("u", 600, false), null); ok(drawn(w) === "u", "its boxes as before, none dashed");
+  w._closeLive(); w.disconnectedCallback();
+  // with it: the chooser, saying the choice
+  w = await mk([TR, PR]);
+  ok(w._lt.src === "auto" && w.conn.open.has(TR) && !w.conn.open.has(PR) && chip(w).hidden === false && chip(w).textContent === "Auto", "with Protect Tracker: the chip beside Boxes says Auto");
+  feed(w, TR, both, "local"); const textA = chip(w).textContent;
+  w.conn.open.get(TR)({ clockWall: Date.now(), source: "protect", tracks: [] }); w.conn.open.get(TR)({ clockWall: Date.now() + 1, source: "local", tracks: [] });
+  ok(drawn(w) === "m,u(dashed)" && chip(w).textContent === textA && w._liveRoot.querySelector(".lbox").getAttribute("data-src") == null, "Auto: both kinds drawn, Protect's own dashed; the chip and the Boxes button don't change with the packets");
+  // Local: only what the model made
+  chip(w).onclick(); await tick(); await tick();
+  ok(ctx.localStorage.store["camera-wall-card:live-source"] === "local" && w._lt.src === "local" && chip(w).textContent === "Local" && w.conn.open.has(TR), "a click: Local, kept in this browser");
+  feed(w, TR, both, "local"); ok(drawn(w) === "m", "Local: only the model's own boxes; Protect's passed-on ones are not shown");
+  // ... and says so when the model has nothing (in a view opened afresh, so nothing from before is still in view)
+  w._closeLive(); w.disconnectedCallback(); w = await mk([TR, PR]);
+  ok(w._lt.src === "local", "(reopened: still Local)");
+  feed(w, TR, car("u2", 300, false), "protect");
+  ok(drawn(w) === "" && chip(w).textContent === "Local", "the model has nothing, Protect has: no boxes (not said at once: it may be a blink)");
+  feed(w, TR, car("u2", 300, false), "protect", 2500);
+  ok(drawn(w) === "" && chip(w).textContent === "Local · nothing now" && chip(w).classList.contains("warn"), "still nothing a moment later: the chip says so");
+  feed(w, TR, both, "local", 5000); ok(drawn(w) === "m" && chip(w).textContent === "Local" && !chip(w).classList.contains("warn"), "the model has something again: its box, and the chip is plain again");
+  // UniFi: Protect's own command, nothing from the tracker
+  chip(w).onclick(); await tick(); await tick();
+  ok(w._lt.src === "protect" && chip(w).textContent === "UniFi" && w.conn.open.has(PR) && !w.conn.open.has(TR), "another click: UniFi, listening to Protect's own feed only");
+  feed(w, PR, car("u", 600, false), null); ok(drawn(w) === "u", "UniFi: Protect's boxes, drawn plain");
+  chip(w).onclick(); await tick(); await tick(); ok(w._lt.src === "auto" && chip(w).textContent === "Auto" && w.conn.open.has(TR), "and round to Auto again");
+  w._closeLive(); w.disconnectedCallback();
+  // the choice is remembered, and offered even when UniFi was left picked
+  ctx.localStorage.store["camera-wall-card:live-source"] = "protect";
+  w = await mk([TR, PR]); ok(w._lt.src === "protect" && chip(w).hidden === false && chip(w).textContent === "UniFi" && w.conn.log.join() === PR, "next time: what was picked, without asking Protect Tracker; the chip is there to change it"); w._closeLive(); w.disconnectedCallback();
+  // the card's own `source` is where it starts
+  ctx.localStorage.store = {};
+  w = await mk([TR, PR], { source: "local" }); ok(w._lt.src === "local" && chip(w).textContent === "Local", "the card's source option is the starting point"); w._closeLive(); w.disconnectedCallback();
+  w = await mk([PR], { source: "local" }); ok(chip(w).hidden === false && chip(w).textContent === "Local · not installed" && !!w._lt && !w.conn.open.has(PR), "Local without Protect Tracker: said on the chip, and Protect's boxes are not slipped in");
+  chip(w).onclick(); await tick(); await tick(); ok(w._lt.src === "protect" && w.conn.open.has(PR), "one click from there to UniFi"); w._closeLive(); w.disconnectedCallback();
+  // one thing, both makes: the local box is kept to
+  { const m = new ctx.LiveTracks(); const B = 1_700_000_200_000;
+    for (let c = B; c <= B + 1000; c += 100) { m.message({ clockWall: c, source: "local", tracks: [{ id: "v", coord: [100 + c - B, 300, 80, 50], objectType: "vehicle", local: true }] }); m.message({ clockWall: c + 50, source: "protect", tracks: [{ id: "v", coord: [108 + c + 50 - B, 300, 90, 56], objectType: "vehicle" }] }); }
+    const pts = m.tracks.get("v").pts; ok(pts.length === 11 && pts.every((q) => q[3] === 80), "a thing reported by both in turn, Protect's even with the newer stamp: only the local box is used while it is fresh (no hopping between two rectangles)");
+    for (let c = B + 2100; c <= B + 3100; c += 100) m.message({ clockWall: c, source: "protect", tracks: [{ id: "v", coord: [108 + c - B, 300, 90, 56], objectType: "vehicle" }] });
+    ok(m.tracks.get("v").pts.length === 22 && m.tracks.get("v").local === false, "the model has let go of it for a second: Protect's box takes over"); }
+  ctx.setTimeout = realTimeout; ctx.localStorage.store = {};
+}
 // --- the tracking card
 {
   ctx.document.addEventListener ||= () => {}; ctx.document.removeEventListener ||= () => {}; ctx.document.hidden = false; ctx.localStorage.store = {};
@@ -1345,6 +1413,10 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(!c._active && blips === 1, "other things as dots while standing by: drawn at a steady pace, not once a packet"); c.disconnectedCallback();
   c = await mkc({ source: "protect" }, [TR, PR]); ok(c.conn.open.has(PR) && !c.conn.open.has(TR), "source: protect leaves Protect Tracker alone");
   c.conn.open.get(PR)(person()); c._active.placeAt = 0; c._frame(c._active); ok(chip(c).hidden === false && chip(c).textContent === "Protect", "and the mark shows the choice made"); c.disconnectedCallback();
+  c = await mkc({ source: "local" }, [TR, PR]);
+  c.conn.open.get(TR)(person({ source: "protect" })); ok(!c._active, "source: local: a person only Protect reports doesn't wake it (local means the model's own)");
+  c.conn.open.get(TR)({ clockWall: Date.now() - 20, source: "local", tracks: [{ id: "q", coord: [400, 400, 60, 160], objectType: "person", local: true }] }); ok(!!c._active, "one the model made does");
+  c.disconnectedCallback();
   c = await mkc({ source: "local" }, [PR]);
   ok(!c._state && /Protect Tracker isn't installed/.test(note(c)) && !c.conn.open.has(PR) && later.length === 1, "source: local without Protect Tracker: the card says so (and doesn't quietly use Protect's)");
   c.conn.have.add(TR); await fire(); ok(note(c) === "" && c.conn.open.has(TR), "once it is installed: the note goes and it is used");

@@ -122,7 +122,10 @@
  *                                           # while Boxes is on (WebRTC)
  *   source: auto                            # optional: whose positions the boxes are:
  *                                           # auto (the Protect Tracker integration's when
- *                                           # installed, else Protect's own) | local | protect
+ *                                           # installed, else Protect's own) | local (only
+ *                                           # what its model made) | protect (only Protect's).
+ *                                           # In the live view a chip beside Boxes switches
+ *                                           # between them (kept in the browser)
  *   live_offset: 0                          # optional: ms to draw the boxes later (+)
  *                                           # or earlier (-), if they don't sit right
  *   phone_landscape: false                  # optional: on a phone, don't turn the
@@ -151,6 +154,9 @@ const GRID_MAX = 8; // columns or rows of an arranged wall, at most
 const ZONES_KEY = "camera-wall-card:zones";
 // live boxes (needs the Protect Detections backend's live relay)
 const LIVE_BOXES_KEY = "camera-wall-card:live-boxes";
+const LIVE_SOURCE_KEY = "camera-wall-card:live-source"; // whose boxes, as picked in the live view
+const LIVE_TRACKER_KEY = "camera-wall-card:live-tracker"; // Protect Tracker has been seen from this browser
+const LIVE_SOURCE_NAMES = { auto: "Auto", local: "Local", protect: "UniFi" };
 const ZOOM_MAX = 8;
 const SVG_NS = "http://www.w3.org/2000/svg";
 // zone colours when Protect gives none
@@ -335,7 +341,9 @@ const LIVE_STYLE = `
   .frame .zoom { position: absolute; inset: 0; transform-origin: 0 0; }
   .frame.zoomed { cursor: grab; touch-action: none; }
   /* what the camera is tracking, live */
-  .lbox[data-src]::after { content: " · " attr(data-src); font-weight: 400; opacity: .75; }
+  .lbox-it.passed { border-style: dashed; }
+  button.chip.lsrc { padding-left: 10px; padding-right: 10px; opacity: .85; }
+  button.chip.lsrc.warn { color: var(--warning-color, #fbbf24); }
   .lboxes { position: absolute; pointer-events: none; }
   .ldebug { position: absolute; left: 8px; bottom: 8px; max-width: calc(100% - 16px); padding: 3px 7px; border-radius: 4px; background: rgba(0,0,0,.7); color: #fff;
     font: 11px/1.4 ui-monospace, monospace; pointer-events: none; z-index: 3; }
@@ -1995,6 +2003,7 @@ class CameraWallCard extends HTMLElement {
           <button class="chip mic" hidden title="Talk through the camera's speaker"><ha-icon icon="mdi:microphone"></ha-icon><span>Talk</span></button>
           <button class="chip zbtn" hidden title="Show this camera's zones over the picture"><ha-icon icon="mdi:vector-polygon"></ha-icon>Zones</button>
           <button class="chip lbox" hidden title="Box what the camera is tracking (the picture is held back a little so they line up)"><ha-icon icon="mdi:vector-square"></ha-icon>Boxes</button>
+          <button class="chip lsrc" hidden></button>
           <button class="chip hd" title="Full-quality feed (slower through the public address)"><ha-icon icon="mdi:high-definition"></ha-icon>HD</button>
           <button class="chip zoomx" hidden title="Zoomed in: click for the whole picture"><ha-icon icon="mdi:magnify-minus-outline"></ha-icon><span></span></button>
           <button class="icon expand" title="Bigger"><ha-icon icon="mdi:arrow-expand"></ha-icon></button>
@@ -2033,6 +2042,7 @@ class CameraWallCard extends HTMLElement {
     root.querySelector(".mic").onclick = () => (this._talk ? this._stopTalk() : this._startTalk());
     root.querySelector(".zbtn").onclick = () => this._zEdit || this._zonesToggle();
     root.querySelector(".lbox").onclick = () => this._ltToggle();
+    root.querySelector(".lsrc").onclick = () => this._ltNextSource();
     // Zone menu: right-click on the picture, or a long press on a touch
     // screen. Anywhere else the browser's own menu is left alone.
     const frame = root.querySelector(".frame");
@@ -2303,6 +2313,27 @@ class CameraWallCard extends HTMLElement {
     } catch (e) {
       return false;
     }
+  }
+
+  // Whose boxes the live view shows: as picked there (kept in this browser),
+  // else the card's `source`, else auto.
+  _ltSource() {
+    let own = null;
+    try {
+      own = localStorage.getItem(LIVE_SOURCE_KEY);
+    } catch (e) {}
+    const cfg = this._config.source;
+    return LIVE_SOURCE_NAMES[own] ? own : LIVE_SOURCE_NAMES[cfg] ? cfg : "auto";
+  }
+
+  // The chip beside Boxes: the next of Auto, Local, UniFi.
+  _ltNextSource() {
+    const all = Object.keys(LIVE_SOURCE_NAMES);
+    const next = all[(all.indexOf(this._ltSource()) + 1) % all.length];
+    try {
+      localStorage.setItem(LIVE_SOURCE_KEY, next);
+    } catch (e) {}
+    this._ltSync();
   }
 
   _ltToggle() {
@@ -2787,21 +2818,28 @@ class CameraWallCard extends HTMLElement {
     bBtn.classList.toggle("on", boxes);
     if (!boxes) return this._ltStop();
     const entity = this._ltCams[cam.entity] ? cam.entity : cam.tap_entity;
+    const src = this._ltSource();
     let lt = this._lt;
-    if (!lt || lt.entity !== entity) {
+    if (!lt || lt.entity !== entity || lt.src !== src) {
       this._ltStop();
-      lt = this._lt = Object.assign(new LiveTracks(), { entity, els: new Map(), placeAt: 0, place: null });
+      lt = this._lt = Object.assign(new LiveTracks(), { entity, src, els: new Map(), placeAt: 0, place: null });
       // (whose positions: see `source` in protect-live.js)
       lt.stop = subscribeLive(
         this._hass,
         entity,
-        cfg.source,
+        src,
         (msg) => this._lt === lt && this._ltMessage(lt, msg),
         (st) => {
           if (this._lt !== lt) return;
           lt.using = st.using;
+          lt.missing = !st.using;
+          if (st.using === "tracker") {
+            try {
+              localStorage.setItem(LIVE_TRACKER_KEY, "1"); // (so the choice is offered from now on)
+            } catch (e) {}
+          }
           this._ltMark(lt);
-          if (st.using || cfg.source === "local") return; // (local, not there: said on the button; it is looked for again)
+          if (st.using || src === "local") return; // (local, not there: said on the chip; it is looked for again)
           if (st.code === "unknown_command") this._ltNone = true;
           this._ltStop();
           this._ltSync(); // (hides the buttons if it is gone)
@@ -2838,26 +2876,40 @@ class CameraWallCard extends HTMLElement {
   }
 
   _ltMessage(lt, msg) {
-    const was = lt.source;
     lt.message(msg);
-    if (lt.source !== was) this._ltMark(lt);
   }
 
-  // Whose positions the boxes are, said on the Boxes button when there is a
-  // choice (Protect Tracker in use, or `source` set).
+  // The chip beside Boxes says whose boxes are shown, and is where that is
+  // picked: Auto (Protect Tracker's where it has them, Protect's otherwise),
+  // Local (only what Protect Tracker's own model made), UniFi (only
+  // Protect's own, nothing from Protect Tracker). It says the choice, not
+  // who made the last packet, so it stays still. It is offered once Protect
+  // Tracker has been seen, or when the card's `source` is set.
   _ltMark(lt) {
-    const btn = this._liveRoot && this._liveRoot.querySelector(".lbox");
-    if (!btn) return;
-    const cfg = this._config;
-    let text = "";
-    if (lt && (lt.using === "tracker" || cfg.source)) {
-      if (!lt.using) text = cfg.source === "local" ? "no tracker" : "";
-      else text = (lt.source || (lt.using === "tracker" ? "local" : "protect")) === "local" ? "local" : "Protect";
+    const chip = this._liveRoot && this._liveRoot.querySelector(".lsrc");
+    if (!chip) return;
+    let known = false;
+    let picked = null;
+    try {
+      known = localStorage.getItem(LIVE_TRACKER_KEY) === "1";
+      picked = localStorage.getItem(LIVE_SOURCE_KEY);
+    } catch (e) {}
+    const show = !!lt && (known || !!this._config.source || !!LIVE_SOURCE_NAMES[picked] || lt.using === "tracker");
+    chip.hidden = !show;
+    if (!show) return;
+    const src = lt.src;
+    let text = LIVE_SOURCE_NAMES[src];
+    let title = { auto: "Boxes: Protect Tracker's where it has them, UniFi Protect's otherwise (dashed). Click for only the local ones", local: "Boxes: only what Protect Tracker's own model made. Click for only UniFi Protect's", protect: "Boxes: only UniFi Protect's own. Click for the best of both" }[src];
+    if (src === "local" && lt.missing) {
+      text += " · not installed";
+      title = "Protect Tracker isn't answering, so there are no local boxes. Click for UniFi Protect's";
+    } else if (src === "local" && lt.idle) {
+      text += " · nothing now";
+      title = "Protect Tracker's model has nothing in view right now (UniFi Protect does). Click for UniFi Protect's";
     }
-    if (text) btn.setAttribute("data-src", text);
-    else btn.removeAttribute("data-src");
-    if (btn._title == null) btn._title = btn.title || "";
-    btn.title = text === "local" ? "Boxes from Protect Tracker, frame by frame" : text === "no tracker" ? "Protect Tracker isn't answering (source: local)" : text ? "Boxes from Protect" : btn._title;
+    if (chip.textContent !== text) chip.textContent = text;
+    chip.title = title;
+    chip.classList.toggle("warn", src === "local" && (!!lt.missing || !!lt.idle));
   }
 
   static _ltAt(t, at) {
@@ -2881,7 +2933,8 @@ class CameraWallCard extends HTMLElement {
     const layer = root.querySelector(".lboxes");
     const behind = this._ltBehind(lt);
     // the camera's moment that is on screen now
-    const now = lt.visible(lt.moment(behind)); // (nothing parked: not worth a box)
+    const at = lt.moment(behind);
+    const now = lt.visible(at, false, lt.src === "local"); // (nothing parked: not worth a box)
     // where the picture is, in the zooming element's own pixels (looked up now and then)
     const stamp = Date.now();
     if (stamp - lt.placeAt > 500) {
@@ -2896,6 +2949,17 @@ class CameraWallCard extends HTMLElement {
         const k = (this._zoom && this._zoom.s) || 1;
         lt.place = [(pic.left - frame.left) / k, (pic.top - frame.top) / k, pic.width / k, pic.height / k];
       } else lt.place = null;
+      // Local picked and the model has nothing while Protect does: said on the chip (after a moment, so it doesn't blink)
+      if (lt.src === "local") {
+        const none = lt.using === "tracker" && !now.length && lt.visible(at).length > 0;
+        if (!none) lt.noneSince = 0;
+        else if (!lt.noneSince) lt.noneSince = stamp;
+        const idle = !!lt.noneSince && stamp - lt.noneSince >= 1500;
+        if (idle !== !!lt.idle) {
+          lt.idle = idle;
+          this._ltMark(lt);
+        }
+      }
       // live_debug: how the boxes are being timed, written on the picture
       const dbg = root.querySelector(".ldebug");
       if (dbg) {
@@ -2921,6 +2985,8 @@ class CameraWallCard extends HTMLElement {
         // (a face found on the person it is drawn with needs no name of its own)
         const label = of != null ? "" : `${t.type.charAt(0).toUpperCase()}${t.type.slice(1)}${t.desc ? ` · ${t.desc}` : ""}`;
         el.classList.toggle("part", of != null);
+        // (Auto, with Protect Tracker: a box that is Protect's own, passed on, is dashed)
+        el.classList.toggle("passed", lt.using === "tracker" && lt.src !== "protect" && of == null && !t.local);
         if (el.firstChild.textContent !== label) el.firstChild.textContent = label;
         el.style.cssText = `left:${(box[0] / 10).toFixed(2)}%;top:${(box[1] / 10).toFixed(2)}%;width:${(box[2] / 10).toFixed(2)}%;height:${(box[3] / 10).toFixed(2)}%;--c:${LIVE_COLORS[t.type] || "#e5e7eb"}`;
         el.firstChild.classList.toggle("below", box[1] < 60);

@@ -773,7 +773,9 @@ class ProtectTrackingCard extends HTMLElement {
     const types = this._config.types;
     // (a face found on someone being followed is part of them, not a thing of its own)
     const own = (msg.tracks || []).filter((tr) => tr && tr.of == null);
-    const hit = own.find((tr) => types.includes(tr.objectType));
+    // (source: local means what Protect Tracker's own model made, and nothing else)
+    const only = this._config.source === "local";
+    const hit = own.find((tr) => types.includes(tr.objectType) && (!only || tr.local === true));
     const now = Date.now();
     if (!hit) {
       // (messages can come thirty a second: the dots needn't)
@@ -948,7 +950,7 @@ class ProtectTrackingCard extends HTMLElement {
     const lt = a.sub.lt;
     const now = Date.now();
     const behind = lt.behind(a.stream, { delay: cfg.live_delay, offset: cfg.live_offset, debug: !!cfg.live_debug });
-    const all = lt.visible(lt.moment(behind), true);
+    const all = lt.visible(lt.moment(behind), true, cfg.source === "local");
     const whole = all.filter((n) => n.of == null);
     const mine = whole.filter((n) => cfg.types.includes(n.t.type)); // (standing still counts too)
     const others = cfg.show_others ? whole.filter((n) => !cfg.types.includes(n.t.type) && lt.moment(behind) - n.t.moved <= 5000) : [];
