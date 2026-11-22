@@ -39,7 +39,7 @@ class El extends Target {
   get textAll() { return (this.textContent || "") + this.children.map((c) => c.textAll).join(""); }
   replaceWith(n) { const p = this.parent; this.isConnected = false; this.disconnectedCallback?.(); this.gone = true; n.parent = p; n.isConnected = !!(p && p.isConnected); if (p) p.children[p.children.indexOf(this)] = n; }
   append(...c) { for (const x of c) this.appendChild(x); } getBoundingClientRect() { return { top: 0, bottom: 400 }; }
-  getContext() { return { clearRect() {}, drawImage() {} }; } insertAdjacentHTML() {} load() {} pause() {} play() { return Promise.resolve(); }
+  getContext() { return (this._g ||= new Proxy({ calls: [], measureText: () => ({ width: 40 }) }, { get: (o, k) => (k in o ? o[k] : (...args) => { o.calls.push([k, ...args]); }), set: (o, k, v) => { o[k] = v; return true; } })); } insertAdjacentHTML() {} load() {} pause() {} play() { return Promise.resolve(); }
   canPlayType() { return "probably"; }
 }
 const win = new Target(); const timers = new Set(); const revoked = [];
@@ -58,6 +58,8 @@ vm.runInContext(fs.readFileSync(FRONTEND + "protect-live.js", "utf8").replace(/^
 vm.runInContext("{" + plain(fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8")) + "}", ctx);
 for (const f of [FRONTEND + "protect-detection-card.js", FRONTEND + "camera-wall-card.js"]) vm.runInContext(plain(fs.readFileSync(f, "utf8")) + "\n;globalThis.swipeStep = typeof swipeStep === 'function' ? swipeStep : globalThis.swipeStep; globalThis.todayStr = typeof todayStr === 'function' ? todayStr : globalThis.todayStr;", ctx);
 const Det = defs["protect-detection-card"], Wall = defs["camera-wall-card"]; const Trk = defs["protect-tracking-card"];
+// (in these tests things are reported the moment a card starts listening: they count as newly come into view unless a test says otherwise)
+ctx.LiveTracks.SETTLE_MS = -Infinity; // (some tests run on a clock of their own, set before the card was made)
 let subs = 0, unsubs = 0; const calls = [];
 const hass = { states: {}, connection: { subscribeMessage: () => { subs++; return Promise.resolve(() => unsubs++); } },
   callWS: (m) => { if (m.type === "network/url") return Promise.resolve({}); calls.push(m); if (m.type.endsWith("/history")) return Promise.resolve({ events: [], more: false });
@@ -1098,6 +1100,74 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(!c._active, "a car that parks in view: let go after it has stood still a while, and the card stands by (it used to stay up for good)");
   c.disconnectedCallback();
 
+  // a sender that has the flag wrong: a parked thing said to be moving, twenty times a second
+  ctx.LiveTracks.SETTLE_MS = 1500;
+  c = await mkc({ types: ["vehicle"] }); c.T0 = Date.now(); // (this card's clock starts when it started listening)
+  const wobbly = (t) => [{ id: "bike", coord: [500 + (t % 100 ? 2 : -2), 600 + (t % 150 ? 1 : -1), 220, 300], objectType: "vehicle", stationary: false, local: true }];
+  for (let n = 0; n < 400; n++) { c.T += 50; c.send(wobbly(c.T), { source: "local" }); c.frame(); }
+  ok(!c._active, "a parked thing reported as moving, 20 times a second for 20 s, wobbling a little: the card isn't taken in (it goes by what the box does, too)");
+  c.run(1500, (t) => [...wobbly(t), car("real", 100 + (t - 20000) * 0.2)]);
+  ok(!!c._active && c._active.subject === "real" && ids(c) === "real", "a car that then really drives in: woken at once, on the car; the bike still isn't boxed");
+  c.run(8000, (t) => wobbly(t)); ok(!c._active, "and when it has gone the card stands by again, the 'moving' bike notwithstanding");
+  // what was there from the start and then really moves is seen by its movement
+  c.run(1500, (t) => [{ id: "bike", coord: [500 + (t - 29500) * 0.2, 600, 220, 300], objectType: "vehicle", stationary: true }]);
+  ok(!c._active, "(a report that says 'stationary' is believed even while the box moves: Protect knows)");
+  c.run(1500, (t) => [{ id: "bike", coord: [800 + (t - 31000) * 0.2, 600, 220, 300], objectType: "vehicle", stationary: false }]);
+  ok(!!c._active && c._active.subject === "bike", "the bike ridden off, reported as moving and seen to move: now it wakes the card");
+  c.disconnectedCallback(); ctx.LiveTracks.SETTLE_MS = -Infinity;
+
+  // --- split view: which things get a pane
+  const plan = Trk.splitPlan; let st = null; const panes = () => st.panes.map((p) => p.id + (p.lostAt ? "?" : "")).join();
+  st = plan(null, ["a"], 2, 10); ok(!st.on, "split: one thing: one view");
+  st = plan(st, ["a", "b"], 2, 1000); st = plan(st, ["a", "b"], 2, 1500); ok(!st.on, "a second thing for half a second: not yet");
+  st = plan(st, ["a"], 2, 1600); st = plan(st, ["a", "b"], 2, 1700); st = plan(st, ["a", "b"], 2, 2600); ok(!st.on, "it went and came back: the second is counted from when it came back");
+  st = plan(st, ["a", "b"], 2, 2700); ok(st.on && panes() === "a,b", "a second thing for a whole second: split, the subject in the first pane");
+  st = plan(st, ["b", "a"], 2, 2800); ok(panes() === "a,b", "said the other way round: each keeps its pane");
+  st = plan(st, ["a", "b", "c"], 2, 2900); ok(panes() === "a,b", "a third thing, two panes at most: the two stay");
+  st = plan(st, ["a", "c"], 2, 3000); ok(panes() === "a,c", "b has gone and c is there: c takes b's place (not a's)");
+  st = plan(st, ["a"], 2, 3100); ok(st.on && panes() === "a,c?", "c gone for a moment: its pane is kept");
+  st = plan(st, ["a", "c"], 2, 3500); ok(panes() === "a,c", "back: nothing moved");
+  st = plan(st, ["a"], 2, 4000); st = plan(st, ["a"], 2, 5000); ok(st.on && panes() === "a", "gone for good: its pane goes, still split for a moment (it may be back)");
+  st = plan(st, ["a"], 2, 5600); ok(!st.on && st.panes.length === 0, "one thing left for a second and a half: one view again");
+  st = plan(null, ["a", "b", "c", "d", "e"], 4, 100); st = plan(st, ["a", "b", "c", "d", "e"], 4, 1100); ok(st.on && panes() === "a,b,c,d", "up to four panes");
+  st = plan(st, ["a", "c", "d", "e"], 4, 1200); ok(panes() === "a,e,c,d", "one goes, a waiting one takes that very pane; the others don't move");
+  st = plan(null, ["a", "b"], 0, 0); st = plan(st, ["a", "b"], 0, 5000); ok(!st.on, "split off: never");
+
+  // --- split view on the card
+  const withVideo = (c2) => { const v = Object.assign(new El(), { tagName: "VIDEO", videoWidth: 1600, videoHeight: 900, readyState: 4, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 562 }) }); c2._active.stream.querySelectorAll = () => [v]; c2._root.querySelector(".zoomer").getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 562 }); return v; };
+  const two = (t) => [bike, car("a", 100 + t * 0.1), car("b", 800 - t * 0.05)];
+  c = await mkc({ types: ["vehicle"] }); c.run(3000, two);
+  ok(!c._root.querySelector(".frame").classList.contains("split") && c._root.querySelector(".panes").children.length === 0, "split not asked for: one view, as before");
+  c.disconnectedCallback();
+  c = await mkc({ types: ["vehicle"], split: 2 }); c.run(400, two); const vid = withVideo(c); c.run(400, two);
+  ok(!c._root.querySelector(".frame").classList.contains("split"), "split: 2, two cars for under a second: still one view");
+  c.run(1500, two); const host = c._root.querySelector(".panes"); const fr = c._root.querySelector(".frame");
+  ok(fr.classList.contains("split") && host.children.length === 2 && c._active.split.panes.map((p) => p.id).join() === "a,b", "two cars moving: a pane each (the parked bike gets none)");
+  const draws = (cv) => cv._g.calls.filter((x) => x[0] === "drawImage");
+  const lastDraw = (cv) => draws(cv)[draws(cv).length - 1];
+  const [pa, pb] = host.children;
+  ok(lastDraw(pa)[1] === vid && lastDraw(pb)[1] === vid && pa.width === 500 && pa.height === 562, "both panes are cut from the one playing picture (no second stream), each the size of its half");
+  const mid = (cv) => { const d = lastDraw(cv); return Math.round(d[2] + d[4] / 2); };
+  const xa = (100 + (c.T - 300) * 0.1 + 50) * 1.6, xb = (800 - (c.T - 300) * 0.05 + 50) * 1.6;
+  ok(Math.abs(mid(pa) - xa) < 60 && Math.abs(mid(pb) - xb) < 60 && lastDraw(pa)[4] < 1600 / 2, `each pane is on its own car, zoomed in (middles ${mid(pa)} and ${mid(pb)} of 1600; cars at ${Math.round(xa)} and ${Math.round(xb)})`);
+  ok(pa._g.calls.some((x) => x[0] === "strokeRect") && pa._g.calls.some((x) => x[0] === "fillText" && /Vehicle/.test(x[1])), "with its box and what it is");
+  ok(!c._root.querySelector(".zoomer").style.transform, "the picture underneath is left whole");
+  // the same two, said in the other order, for a while: no swapping
+  const orders = new Set(); for (let n = 0; n < 20; n++) { c.run(100, (t) => [...two(t)].reverse()); orders.add([...host.children].map((x) => (x === pa ? "A" : x === pb ? "B" : "?")).join("")); }
+  ok(orders.size === 1 && orders.has("AB"), "reported in another order for two seconds: the panes don't swap");
+  // one leaves: one view again, on the one that is left
+  c.run(1000, (t) => [bike, car("b", 800 - t * 0.05)]); ok(fr.classList.contains("split"), "one car has left: not undone at once");
+  c.run(2500, (t) => [bike, car("b", 800 - t * 0.05)]);
+  ok(!fr.classList.contains("split") && host.children.length === 0 && c._active.subject === "b" && c.centre()[1] > 1.5, "a moment later: one view again, zoomed in on the car that is left");
+  c.disconnectedCallback();
+  // a small card never splits
+  c = await mkc({ types: ["vehicle"], split: 4 }); Object.assign(c._root.querySelector(".frame"), { clientWidth: 240, clientHeight: 135 }); c.run(3000, two);
+  ok(!c._root.querySelector(".frame").classList.contains("split") && c._active.subject === "a", "a card too small for panes: one view on the subject"); c.disconnectedCallback();
+  // a tall card stacks its two panes
+  c = await mkc({ types: ["vehicle"], split: 2 }); Object.assign(c._root.querySelector(".frame"), { clientWidth: 400, clientHeight: 600 }); c.run(400, two); withVideo(c); c.run(2000, two);
+  ok(/repeat\(1,1fr\).*repeat\(2,1fr\)/.test(c._root.querySelector(".panes").style.cssText), "a tall card: the two panes one above the other"); c.disconnectedCallback();
+  ok(new Trk()._splitMax === undefined || (() => { const t = new Trk(); t.setConfig({}); const a0 = t._splitMax(); t.setConfig({ split: "auto" }); const a1 = t._splitMax(); t.setConfig({ split: 9 }); const a2 = t._splitMax(); t.setConfig({ split: "off" }); return a0 === 0 && a1 === 2 && a2 === 4 && t._splitMax() === 0; })(), "split: off by default; auto is 2; never more than 4");
+
   // steady zoom: the box's size wobbling a little between packets doesn't move the zoom
   c = await mkc({ types: ["person"] });
   c.run(3000, (t) => [{ id: "w", coord: [400, 300, 60 + ((t / 100) % 2 ? 2 : -2), 180 + ((t / 100) % 2 ? 4 : -4)], objectType: "person", stationary: false }]);
@@ -1202,7 +1272,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
       callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { "camera.p_high_resolution_channel": "p1", "camera.q_high_resolution_channel": "q1" } });
         if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
     const c = new Trk(); c.setConfig(cfg); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick();
-    c.see = (type = "person") => subs.get(cfg.camera)({ clockWall: Date.now() - 400, tracks: [{ id: type, coord: [400, 400, 60, 160], objectType: type }] }); return c; };
+    let seenN = 0; c.see = (type = "person") => subs.get(cfg.camera)({ clockWall: Date.now() - 400, tracks: [{ id: type + ++seenN, coord: [400, 400, 60, 160], objectType: type }] }); return c; }; // (each a thing newly come into view)
   const P = "camera.p_high_resolution_channel", Q = "camera.q_high_resolution_channel";
   const plays = () => { const n = tones; tones = 0; return n; };
   const later = (ms, f) => { const real = Date.now; const at = real() + ms; Date.now = () => at; try { return f(); } finally { Date.now = real; } };

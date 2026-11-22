@@ -57,6 +57,13 @@ const LIVE_HLS_EXTRA_MS = 1500; // what an HLS picture is behind beyond what its
 const LIVE_KEEP_MS = 30000; // how long positions are kept (an HLS picture is seconds behind)
 const LIVE_HOLD_MS = 600; // a thing stays this long past its last report
 const LIVE_PARKED_MS = 5000; // not moved for this long: parked
+// Is a thing moving? Not only by what its reports say (`stationary`): a
+// sender can have that wrong, and a parked thing would then count as on the
+// move for good. So it is also measured: a thing has moved when its box has
+// gone further than a wobble from where it last settled. A thing only just
+// come into view is taken at its word, so that someone walking in is seen
+// at once; but not what is already there when listening starts.
+const LIVE_YOUNG_MS = 1500; // "only just come into view"
 const LIVE_PACE_MS = 400; // how a thing is moving is taken from its reports of the last this long, when they come many a second
 
 // Where the positions come from.
@@ -194,6 +201,10 @@ export function pictureBox(el, r = el.getBoundingClientRect()) {
  * timing against a live picture (a `ha-camera-stream` element).
  */
 export class LiveTracks {
+  // A thing first reported this soon after listening started was there
+  // already (a parked car), and is not taken at its word about moving.
+  static SETTLE_MS = 1500;
+
   constructor() {
     this.tracks = new Map(); // id -> {id, type, desc, confidence, zones, loiterZones, lines, pts: [[moment, x, y, w, h]], moved, local, of}
     this.quick = { protect: new Map(), local: new Map() }; // per second of late: the quickest message of each make
@@ -209,6 +220,7 @@ export class LiveTracks {
     this.sync = "estimate"; // or "rtp": how the moment on screen was found
     this.lag = null; // (rtp) the frame on screen is this far behind the newest positions
     this.channel = 1;
+    this.began = Date.now(); // when listening started (our clock)
     this.said = false; // do the messages say who made their positions
     this.localAt = 0; // when (our clock) a locally made one last came
     this.debug = false; // (live_debug) also check the timing against the picture
@@ -239,7 +251,11 @@ export class LiveTracks {
     for (const tr of msg.tracks || []) {
       if (!tr || !Array.isArray(tr.coord) || tr.coord.length !== 4) continue;
       let t = this.tracks.get(tr.id);
-      if (!t) this.tracks.set(tr.id, (t = { id: tr.id, type: tr.objectType || "object", desc: "", pts: [], moved: 0 }));
+      if (!t) {
+        // (there from the start, or come into view since: see LIVE_YOUNG_MS)
+        const fresh = now - this.began >= LiveTracks.SETTLE_MS;
+        this.tracks.set(tr.id, (t = { id: tr.id, type: tr.objectType || "object", desc: "", pts: [], moved: 0, went: 0, first: msg.clockWall, fresh, rest: null }));
+      }
       if (tr.objectType) t.type = tr.objectType;
       if (tr.desc) t.desc = tr.desc;
       // made by Protect Tracker's own model (Protect's own reports of the same thing come in between: it stays so)
@@ -249,13 +265,24 @@ export class LiveTracks {
       t.of = tr.of != null && tr.of !== "" ? String(tr.of) : null;
       if (Number.isFinite(tr.confidence)) t.confidence = tr.confidence;
       for (const key of ["zones", "loiterZones", "lines"]) if (Array.isArray(tr[key])) t[key] = tr[key];
-      if (!tr.stationary && msg.clockWall > t.moved) t.moved = msg.clockWall;
       const last = t.pts[t.pts.length - 1];
       if (last && last[0] >= msg.clockWall) continue;
       // (while the local model has a thing, Protect's own box for it is left
       // aside: the two differ a little, and the box would hop between them)
       if (tr.local !== true && t.localAt != null && Math.abs(msg.clockWall - t.localAt) < LIVE_LOCAL_HOLD_MS) continue;
-      t.pts.push([msg.clockWall, ...tr.coord.map(Number)]);
+      const c = tr.coord.map(Number);
+      t.pts.push([msg.clockWall, ...c]);
+      // moved, as measured: further than a wobble from where it last rested
+      const mid = [c[0] + c[2] / 2, c[1] + c[3] / 2];
+      const step = Math.max(10, 0.12 * Math.min(c[2], c[3]));
+      if (!t.rest) t.rest = mid;
+      else if (Math.abs(mid[0] - t.rest[0]) >= step || Math.abs(mid[1] - t.rest[1]) >= step) {
+        t.rest = mid;
+        t.went = msg.clockWall;
+      }
+      // moving: measured so, or said so by a thing only just come into view
+      const young = t.fresh && msg.clockWall - t.first <= LIVE_YOUNG_MS;
+      if ((t.went === msg.clockWall || (young && !tr.stationary)) && msg.clockWall > t.moved) t.moved = msg.clockWall;
       while (t.pts.length > 2 && t.pts[0][0] < msg.clockWall - LIVE_KEEP_MS) t.pts.shift();
     }
     for (const [id, t] of this.tracks) {

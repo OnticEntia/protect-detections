@@ -44,6 +44,10 @@
  *   source: auto                            # whose positions: auto (the Protect Tracker
  *                                           # integration's when it is installed, else
  *                                           # Protect's own) | local | protect
+ *   split: off                              # 2, 3 or 4: with that many things of a watched
+ *                                           # kind on the move, a pane for each (at most),
+ *                                           # each zoomed in on its own; off: one view, on
+ *                                           # the subject
  *   live_debug: false                       # true: write on the picture how the boxes
  *                                           # are being timed
  *   sound: none                             # a sound when it starts following someone:
@@ -70,6 +74,16 @@
  * subject. With nothing moving left it stands by again after `linger`,
  * whatever is parked in view. A subject that is not a person and has stood
  * still for 20 s counts as parked and is let go.
+ *
+ * Split view (`split: 2` to `4`). When a second thing of a watched kind has
+ * been moving for a second, the picture splits into panes, one for each
+ * (up to the number given), each zoomed in on its own thing. The panes are
+ * drawn from the one stream that is playing: copies of its picture, cut
+ * out, on canvases (no second stream, on WebRTC and HLS alike). A thing
+ * keeps its pane while it is there; one that goes is given a moment, and a
+ * new one takes a free pane or the place of one just gone. With one thing
+ * left for a second and a half it is one view again, on that thing. Parked
+ * things get no pane, and a small card (under 260 x 150 px) never splits.
  *
  * Standing by, no video is playing: the card listens to where Protect says
  * things are (while it is on screen and the page is in front; not otherwise)
@@ -101,6 +115,10 @@ const MOVING_MS = 2000; // a thing counts as on the move while a report said so 
 const SWITCH_MS = 900; // the subject gone this long: another moving thing may be taken instead
 const HANDOVER_MS = 1500; // the subject's reports going on under another id: taken up within this, where it was
 const PARKED_MS = 20000; // a subject that isn't a person and has stood still this long is let go (it has parked)
+// Split view (`split`): a pane each for several things on the move.
+const SPLIT_IN_MS = 1000; // a second thing must be moving this long before the view splits
+const SPLIT_OUT_MS = 1500; // and only one left this long before it is one view again
+const SPLIT_MIN = [260, 150]; // a card smaller than this (px) stays one view
 const FAIL_MS = 12000; // no picture this long after starting: say so
 const LAST_KEY = "protect-tracking-card:last:";
 
@@ -365,6 +383,12 @@ const STYLE = `
   .snd[hidden] { display: none; }
   .snd:hover, .snd.locked, .snd.muted { opacity: .95; }
   .snd.locked { color: var(--warning-color, #fbbf24); }
+  /* split view: the panes lie over the picture they are cut from */
+  .panes { position: absolute; inset: 0; display: grid; gap: 2px; background: #000; }
+  .frame:not(.split) .panes { display: none; }
+  .panes canvas { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; }
+  .frame.split .zoomer { opacity: 0; }
+  .frame.split .info { display: none; }
   .dbg { position: absolute; left: 8px; right: 8px; bottom: 36px; padding: 3px 7px; border-radius: 4px; background: rgba(0,0,0,.7); color: #fff;
     font: 11px/1.4 ui-monospace, monospace; pointer-events: none; }
   .dbg[hidden], .frame:not(.active) .dbg { display: none; }
@@ -400,6 +424,138 @@ class ProtectTrackingCard extends HTMLElement {
     this._build();
     this._size();
     if (this._hass) this._discover();
+  }
+
+  // ----------------------------------------------------------- split view
+
+  // How many panes at most (0: no split view).
+  _splitMax() {
+    const v = this._config && this._config.split;
+    const n = v === true || v === "auto" ? 2 : Number(v);
+    return n >= 2 ? Math.min(4, Math.floor(n)) : 0;
+  }
+
+  // Which things have a pane. `st` is what was decided before (null at
+  // first), `ids` the things of a watched kind on the move now (the subject
+  // first), `max` the most panes. Returns {on, panes: [{id, lostAt}], ...}:
+  // split or not, and the panes in their places. Things keep their places;
+  // nothing changes for a thing there or gone only a moment.
+  static splitPlan(st, ids, max, now) {
+    st = st || { on: false, panes: [], moreAt: 0, lessAt: 0 };
+    if (max < 2) return Object.assign(st, { on: false, panes: [], moreAt: 0, lessAt: 0 });
+    if (!st.on) {
+      if (ids.length < 2) st.moreAt = 0;
+      else {
+        st.moreAt = st.moreAt || now;
+        if (now - st.moreAt >= SPLIT_IN_MS) Object.assign(st, { on: true, lessAt: 0, panes: ids.slice(0, max).map((id) => ({ id, lostAt: 0 })) });
+      }
+      return st;
+    }
+    const here = new Set(ids);
+    for (const p of st.panes) p.lostAt = here.has(p.id) ? 0 : p.lostAt || now;
+    // a new thing: into the place of one that has just gone (its reports may
+    // be going on under another id), else a free pane
+    for (const id of ids) {
+      if (st.panes.some((p) => p.id === id)) continue;
+      const gone = st.panes.find((p) => p.lostAt);
+      if (gone) Object.assign(gone, { id, lostAt: 0 });
+      else if (st.panes.length < max) st.panes.push({ id, lostAt: 0 });
+    }
+    st.panes = st.panes.filter((p) => !p.lostAt || now - p.lostAt < SWITCH_MS);
+    if (st.panes.filter((p) => !p.lostAt).length > 1) st.lessAt = 0;
+    else {
+      st.lessAt = st.lessAt || now;
+      if (now - st.lessAt >= SPLIT_OUT_MS) Object.assign(st, { on: false, panes: [], moreAt: 0, lessAt: 0 });
+    }
+    return st;
+  }
+
+  // The panes, drawn: each a cut-out of the playing picture round its thing.
+  _splitDraw(a, nodes, W, H, now) {
+    const root = this._root;
+    const host = root.querySelector(".panes");
+    const panes = a.split.panes;
+    const cols = panes.length >= 3 ? 2 : W >= H * 1.2 ? 2 : 1;
+    const rows = Math.max(1, Math.ceil(panes.length / cols));
+    const grid = `grid-template-columns:repeat(${cols},1fr);grid-template-rows:repeat(${rows},1fr)`;
+    if (host.style.cssText !== grid) host.style.cssText = grid;
+    a.paneEls = a.paneEls || new Map();
+    const order = panes.map((p) => String(p.id)).join("|");
+    if (order !== a.paneOrder) {
+      a.paneOrder = order;
+      const next = new Map();
+      for (const p of panes) {
+        // (a thing taking another's place takes over its canvas and its view, so the picture moves over rather than jumps)
+        const el = a.paneEls.get(p.id) || [...a.paneEls].filter(([id]) => !panes.some((q) => q.id === id) && ![...next.values()].includes(a.paneEls.get(id))).map(([, e]) => e)[0] || document.createElement("canvas");
+        next.set(p.id, el);
+      }
+      a.paneEls = next;
+      host.replaceChildren(...panes.map((p) => next.get(p.id)));
+    }
+    const video = a.video;
+    const vw = video && video.videoWidth;
+    const vh = video && video.videoHeight;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const pw = W / cols;
+    const ph = H / rows;
+    const f = a.paneAt ? 1 - Math.exp(-Math.min(250, now - a.paneAt) / EASE_MS) : 1;
+    a.paneAt = now;
+    for (const p of panes) {
+      const cv = a.paneEls.get(p.id);
+      const cw = Math.max(1, Math.round(pw * dpr));
+      const ch = Math.max(1, Math.round(ph * dpr));
+      if (cv.width !== cw) cv.width = cw;
+      if (cv.height !== ch) cv.height = ch;
+      const node = nodes.get(p.id);
+      // its view (0..1000 of the picture): how far in, and the middle
+      const v = (cv._view = cv._view || null);
+      if (node) {
+        const [x, y, w, h] = node.box;
+        let s = Math.max(1, Math.min(Number(this._config.max_zoom) || 4, 1000 / (Math.max(1, w) * 3), 1000 / (Math.max(1, h) * 2)));
+        if (v && Math.abs(s - v.ws) / v.ws < 0.08) s = v.ws;
+        const want = [s, x + w / 2, y + h / 2];
+        if (!v) cv._view = { s: want[0], x: want[1], y: want[2], ws: s };
+        else Object.assign(v, { s: v.s + (want[0] - v.s) * f, x: v.x + (want[1] - v.x) * f, y: v.y + (want[2] - v.y) * f, ws: s });
+      }
+      const view = cv._view;
+      if (!view || !vw || !vh) continue;
+      const g = cv.getContext("2d");
+      // the cut-out: the pane's shape, as much of the picture as the zoom leaves
+      const ar = pw / ph;
+      let sh = vh / view.s;
+      let sw = sh * ar;
+      if (sw > vw) {
+        sw = vw;
+        sh = Math.min(vh, sw / ar);
+      }
+      const sx = Math.max(0, Math.min(vw - sw, (view.x / 1000) * vw - sw / 2));
+      const sy = Math.max(0, Math.min(vh - sh, (view.y / 1000) * vh - sh / 2));
+      try {
+        g.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
+      } catch (e) {
+        continue;
+      }
+      if (!node) continue;
+      const [x, y, w, h] = node.box;
+      const color = LIVE_COLORS[node.t.type] || "#e5e7eb";
+      g.lineWidth = 2 * dpr;
+      g.strokeStyle = color;
+      g.strokeRect((((x / 1000) * vw - sx) / sw) * cw, (((y / 1000) * vh - sy) / sh) * ch, (((w / 1000) * vw) / sw) * cw, (((h / 1000) * vh) / sh) * ch);
+      const label = `${KINDS[node.t.type] ? KINDS[node.t.type][0] : node.t.type}${node.t.desc ? ` · ${node.t.desc}` : ""}`;
+      g.font = `600 ${11 * dpr}px sans-serif`;
+      g.fillStyle = "rgba(0,0,0,.6)";
+      g.fillRect(6 * dpr, 6 * dpr, g.measureText(label).width + 10 * dpr, 18 * dpr);
+      g.fillStyle = "#fff";
+      g.fillText(label, 11 * dpr, 19 * dpr);
+    }
+  }
+
+  _splitEnd(a) {
+    const root = this._root;
+    if (!root) return;
+    root.querySelector(".frame").classList.remove("split");
+    root.querySelector(".panes").replaceChildren();
+    if (a) Object.assign(a, { paneEls: null, paneOrder: null, paneAt: 0 });
   }
 
   // ---------------------------------------------------------------- sound
@@ -550,6 +706,7 @@ class ProtectTrackingCard extends HTMLElement {
           <div class="idle"><ha-icon icon="mdi:account-eye-outline"></ha-icon><b></b><span></span><small></small><small class="note"></small></div>
           <div class="top"><span class="chip live"><i></i><span class="cam"></span></span><span class="chip src" hidden></span><span class="chip warn" hidden></span></div>
           <div class="info"></div>
+          <div class="panes"></div>
           <div class="dbg" hidden></div>
           <button class="snd" type="button" hidden><ha-icon></ha-icon></button>
         </div>
@@ -793,7 +950,12 @@ class ProtectTrackingCard extends HTMLElement {
     // (source: local means what Protect Tracker's own model made, and nothing else)
     const only = this._config.source === "local";
     // (and something standing still wakes nothing: a parked car, a bike on the porch)
-    const hit = own.find((tr) => types.includes(tr.objectType) && !tr.stationary && (!only || tr.local === true));
+    // (whether it is moving is the positions' own judgement as well as the report's: see protect-live.js)
+    const moves = (tr) => {
+      const t = sub.lt.tracks.get(tr.id);
+      return !!t && Number.isFinite(msg.clockWall) && msg.clockWall - t.moved <= 400;
+    };
+    const hit = own.find((tr) => types.includes(tr.objectType) && !tr.stationary && moves(tr) && (!only || tr.local === true));
     const now = Date.now();
     if (!hit) {
       // (messages can come thirty a second: the dots needn't)
@@ -939,6 +1101,7 @@ class ProtectTrackingCard extends HTMLElement {
     this._warmCheck();
     clearTimeout(this._lockTimer);
     root.querySelector(".frame").classList.remove("active", "lock", "playing");
+    this._splitEnd(null);
     // (the reticle drifts back to the middle as the scanner fades in again)
     for (const v of ["--dx", "--dy", "--ls"]) root.querySelector(".reticle").style.removeProperty(v);
     root.querySelector(".zoomer").style.transform = "";
@@ -1022,9 +1185,13 @@ class ProtectTrackingCard extends HTMLElement {
     if (now - a.placeAt > 500) {
       a.placeAt = now;
       let pic = null;
+      a.video = null;
       for (const el of deepFind(a.stream, ["VIDEO"])) {
         const b = pictureBox(el);
-        if (b && (!pic || b.width * b.height > pic.width * pic.height)) pic = b;
+        if (b && (!pic || b.width * b.height > pic.width * pic.height)) {
+          pic = b;
+          a.video = el; // (the panes of a split view are drawn from it)
+        }
       }
       if (pic) {
         const z = root.querySelector(".zoomer").getBoundingClientRect();
@@ -1082,11 +1249,25 @@ class ProtectTrackingCard extends HTMLElement {
       a.els.delete(id);
     }
 
-    // the view: on the subject, and on nothing else
-    const group = subject ? [subject] : [];
+    // split view: with several things on the move, a pane each
+    const max = this._splitMax();
+    if (max) {
+      const was = !!(a.split && a.split.on);
+      const roomy = W >= SPLIT_MIN[0] && H >= SPLIT_MIN[1];
+      const movers = roomy ? [...(subject ? [subject] : []), ...shown.filter((n) => n !== subject)].map((n) => n.t.id) : [];
+      a.split = ProtectTrackingCard.splitPlan(a.split, movers, max, now);
+      if (a.split.on) {
+        frame.classList.add("split");
+        this._splitDraw(a, new Map(shown.map((n) => [n.t.id, n])), W, H, now);
+      } else if (was) this._splitEnd(a);
+    }
+    const split = !!(a.split && a.split.on);
+    // the view: on the subject, and on nothing else (in a split view the whole picture lies under the panes)
+    const group = subject && !split ? [subject] : [];
     const v = a.view;
+    if (split) Object.assign(v, { want: null, s: 1, cx: W / 2, cy: H / 2 }); // (nothing to ease: it can't be seen)
     let want = null;
-    if (subject) {
+    if (subject && !split) {
       const [x0, y0, w0, h0] = subject.box;
       const w = Math.max(1, w0);
       const h = Math.max(1, h0);
@@ -1162,7 +1343,7 @@ class ProtectTrackingCard extends HTMLElement {
 // a sound on every click on it, the one already picked included.
 
 // What the card does where the config says nothing (as setConfig has it).
-const EDIT_DEFAULTS = { types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, sound: "none", sound_volume: 0.5 };
+const EDIT_DEFAULTS = { types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, split: "off", sound: "none", sound_volume: 0.5 };
 const EDIT_FORM = [
   { name: "camera", selector: { entity: { domain: "camera", integration: "unifiprotect" } } },
   { name: "name", selector: { text: {} } },
@@ -1171,10 +1352,12 @@ const EDIT_FORM = [
   { name: "linger", selector: { number: { min: 1, max: 120, mode: "box", unit_of_measurement: "s" } } },
   { name: "show_others", selector: { boolean: {} } },
   { name: "warm", selector: { boolean: {} } },
+  { name: "split", selector: { select: { options: [{ value: "off", label: "One view, on the subject" }, { value: "2", label: "Up to 2 panes" }, { value: "3", label: "Up to 3 panes" }, { value: "4", label: "Up to 4 panes" }] } } },
   { name: "height", selector: { text: {} } },
 ];
 const EDIT_LABELS = { camera: "Camera (empty: every camera that recognises things)", name: "Name (empty: the camera's)", types: "Watch for", standby: "Standing-by look",
-  linger: "Stay after last seen", show_others: "Also box other things", warm: "Live picture while standing by (keeps the stream running)", height: "Height, e.g. 300px (empty: by shape)" };
+  linger: "Stay after last seen", show_others: "Also box other things", warm: "Live picture while standing by (keeps the stream running)", height: "Height, e.g. 300px (empty: by shape)",
+  split: "Several things moving at once" };
 const EDIT_STYLE = `
   :host { display: block; }
   .sound { margin-top: 20px; }
@@ -1224,6 +1407,7 @@ class ProtectTrackingCardEditor extends HTMLElement {
       else if (name in EDIT_DEFAULTS) out[name] = EDIT_DEFAULTS[name];
     }
     if (typeof out.height === "number") out.height = String(out.height); // (a text field)
+    out.split = out.split === true || out.split === "auto" ? "2" : Number(out.split) >= 2 ? String(Math.min(4, Math.floor(Number(out.split)))) : "off"; // (a number in YAML)
     return out;
   }
 
