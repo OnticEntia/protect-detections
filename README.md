@@ -10,6 +10,17 @@ It is a companion to Home Assistant's built-in **UniFi Protect** integration. It
 
 > **Unofficial.** This project is not affiliated with Ubiquiti. Parts of it use interfaces of UniFi Protect that are not documented (the same ones Protect's own web app uses). A Protect update can change or remove them; features that depend on them then stop working until this integration is updated.
 
+## Screenshots
+
+| | |
+|---|---|
+| ![The camera wall: six feeds and a tracking tile standing by](docs/images/camera-wall.webp) | ![A camera's live dialog with its zones drawn over the picture](docs/images/live-view-zones.webp) |
+| The camera wall, with a tracking tile standing by | A camera's live dialog, with zones |
+| ![The detection history as a grid of object photos](docs/images/history-grid.webp) | ![A detection's recording playing, with a box and label on a car](docs/images/history-clip.webp) |
+| The detection history | A detection's recording, with Protect's boxes |
+
+Camera and zone names are painted out in these pictures.
+
 ## Requirements
 
 - Home Assistant 2026.3 or newer.
