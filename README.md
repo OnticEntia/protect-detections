@@ -130,6 +130,20 @@ Watches every camera that recognises things and shows whichever one sees a perso
 
 In a *Sections* view the card can be dragged to any width and height.
 
+"Last seen" comes from the integration's own record (below), so it is the same on every device and counts people who came by while no dashboard was open.
+
+## The record of live sightings
+
+The integration listens to the live tracking of every camera that recognises things, all the time, and remembers what it reported:
+
+- when each kind of thing (person, vehicle, …) was last seen on each camera;
+- the newest 100 sightings per camera and kind: start, end, peak confidence, the zones, loiter zones and lines it was in, and Protect's event ids;
+- when a camera's feed was not connected, so "nothing was seen" can be told from "nothing was listening".
+
+It is kept in Home Assistant's `.storage` folder and survives a restart. To read it, call the websocket command `protect_detections/live/seen` (Developer tools → Actions cannot do this; use a card, a script against the websocket API, or the browser console). It takes optional `entity` (one camera), `types`, `limit` (default 50; `0` for the last-seen times only) and `since` (ms).
+
+**What it costs:** one extra connection to the Protect console per camera that recognises things, open all the time, carrying a few small messages a second while that camera tracks something. **To turn it off:** Settings → Devices & services → Protect Detections → Configure. Live tracking is then listened to only while a dashboard shows it, and "Last seen" goes back to what each browser saw itself.
+
 ## Companions
 
 Both are optional features of the cards, but see the note on Protect Zones.
@@ -143,6 +157,7 @@ HACS installs one repository at a time and does not install Protect Zones for yo
 
 - **Everything stays local.** The integration talks only to your Protect console, through the UniFi Protect integration's session. Nothing is sent anywhere else.
 - **It relays camera data to dashboards.** Any logged-in Home Assistant user can see detections, object photos, recorded clips and live positions through this integration, and can talk through a camera's speaker. It does not add per-user restrictions of its own. Give dashboard access accordingly.
+- **A record of sightings is kept.** When and where (which zones) each kind of thing was seen by live tracking is stored in Home Assistant's `.storage` folder: times, kinds and zone numbers, no pictures. See [The record of live sightings](#the-record-of-live-sightings) to turn it off.
 - **Clips are written to disk.** A played clip is exported from Protect into the system's temporary folder on the Home Assistant machine. Only the newest 24 clips are kept (600 MB at most), and the folder is emptied when the integration starts and stops.
 - **Talk** sends your browser's microphone audio to the camera's speaker. Browsers only allow the microphone over https; on a plain http address the wall opens a small talk window on your https address instead.
 - **The card files are public**, like Home Assistant's own frontend files: they contain code only, no data, and are served without a login.
@@ -160,6 +175,7 @@ HACS installs one repository at a time and does not install Protect Zones for yo
 | Boxes sit ahead of or behind the picture | Adjust `live_offset`. Browsers that cannot hold a live picture back draw the boxes late. |
 | Clips do not play | The camera must be recording in Protect for the time of the detection. Some browsers cannot play HEVC; the card then asks for an H.264 copy, which takes a little longer. |
 | No talk button | The camera needs a speaker, and the page must be on https (or the talk window is used). |
+| The tracking card didn't react to someone | Ask `protect_detections/live/seen` for that time. A sighting of the right kind means Protect reported them and the card wasn't listening (it listens only while on screen). A gap means the feed was down. Neither means Protect's live tracking didn't report them. |
 | Something stopped working after a Protect update | Protect's undocumented interfaces may have changed. Please open an issue with your Protect and Home Assistant versions. |
 
 ## Development

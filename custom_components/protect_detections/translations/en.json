@@ -18,5 +18,18 @@
       "title": "Protect Detections needs Protect Zones",
       "description": "Protect Detections uses the connection to UniFi Protect that the Protect Zones integration provides, and Protect Zones isn't installed.\n\nInstall Protect Zones (through HACS, or by copying it into `custom_components`), restart Home Assistant, then reload Protect Detections."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Protect Detections",
+        "data": {
+          "record_sightings": "Keep a record of what live tracking sees"
+        },
+        "data_description": {
+          "record_sightings": "Listens to the live tracking of every camera that recognises things, all the time, and remembers when each kind of thing was last seen. The tracking card's \"Last seen\" comes from it. Costs one extra connection to the Protect console per such camera. Turned off, live tracking is listened to only while a dashboard shows it."
+        }
+      }
+    }
   }
 }

@@ -95,7 +95,12 @@ const STYLE = `
     color: #fff; font-family: var(--paper-font-body1_-_font-family, inherit); }
   .snap { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .55; filter: saturate(.7); transition: opacity .4s; }
   .snap:not([src]) { visibility: hidden; }
+  /* someone is there: the still stands in until the live picture plays, then
+     goes. Only one picture at a time: the still fills the card and the live
+     one is shown whole, so in a card of another shape than the camera's the
+     still would show round the live picture's edges. */
   .active .snap { opacity: 1; filter: none; }
+  .playing .snap { opacity: 0; visibility: hidden; transition: opacity .3s, visibility 0s .3s; }
   .zoomer { position: absolute; inset: 0; transform-origin: 0 0; will-change: transform; }
   /* the whole picture, whatever the frame's shape (bars beside or above it
      rather than a cut-off edge: nobody followed is ever outside it) */
@@ -305,7 +310,10 @@ class ProtectTrackingCard extends HTMLElement {
       });
     }
     this._seenBy?.observe(this);
-    this._tick = setInterval(() => this._idle(), 30000);
+    this._tick = setInterval(() => {
+      if (!document.hidden && this._onScreen !== false) this._askSeen();
+      this._idle();
+    }, 30000);
     this._sync();
   }
 
@@ -358,7 +366,9 @@ class ProtectTrackingCard extends HTMLElement {
     else if (!this._cams) text = "Looking for cameras…";
     else if (this._listening === false) text = "Paused while out of sight";
     status.textContent = text;
-    let seen = this._lastSeen || 0;
+    // (what this card saw itself, what the integration recorded, and for an
+    // integration that keeps no record, what this browser remembers)
+    let seen = Math.max(this._lastSeen || 0, this._serverSeen || 0);
     if (!seen && cams.length) {
       try {
         seen = Number(localStorage.getItem(LAST_KEY + this._lastKey())) || 0;
@@ -370,6 +380,36 @@ class ProtectTrackingCard extends HTMLElement {
     const frame = root.querySelector(".frame");
     frame.classList.toggle("paused", this._listening !== true);
     frame.classList.toggle("noscan", !!this._state || !this._cams || !this._cams.length);
+  }
+
+  // When the watched kinds were last seen, as the integration recorded it:
+  // it listens whether or not a dashboard is open, so this is the same on
+  // every device. An older integration doesn't know the question, and the
+  // card then goes by what this browser saw.
+  _askSeen(now) {
+    const hass = this._hass;
+    const cams = this._cams || [];
+    if (!hass || !cams.length || this._state || this._noSeen) return;
+    if (!now && Date.now() - (this._seenAsked || 0) < 50000) return;
+    this._seenAsked = Date.now();
+    const types = this._config.types;
+    Promise.resolve(hass.callWS({ type: "protect_detections/live/seen", limit: 0, types })).then(
+      (res) => {
+        if (this._cams !== cams || !res || !res.cameras) return;
+        let seen = 0;
+        for (const cam of cams) {
+          const last = (res.cameras[cam.id] && res.cameras[cam.id].last) || {};
+          for (const t of types) seen = Math.max(seen, Number(last[t] && last[t].seen) || 0);
+        }
+        // (told in the server's clock; this device's may differ)
+        if (seen && Number(res.now)) seen = Math.min(Date.now(), seen + Date.now() - res.now);
+        this._serverSeen = seen;
+        if (!this._active) this._idle();
+      },
+      (err) => {
+        if (err && err.code === "unknown_command") this._noSeen = true;
+      }
+    );
   }
 
   _lastKey() {
@@ -405,8 +445,10 @@ class ProtectTrackingCard extends HTMLElement {
       if (!same) {
         this._stopAll();
         this._cams = cams;
+        this._serverSeen = 0;
       }
       this._idle();
+      this._askSeen(!same);
       this._sync();
     };
     const ask = (this._asking = {});
@@ -637,13 +679,14 @@ class ProtectTrackingCard extends HTMLElement {
       if (this._warm) root.querySelector(".video").replaceChildren(this._warm.stream);
     }
     clearTimeout(this._lockTimer);
-    root.querySelector(".frame").classList.remove("active", "lock");
+    root.querySelector(".frame").classList.remove("active", "lock", "playing");
     // (the reticle drifts back to the middle as the scanner fades in again)
     for (const v of ["--dx", "--dy", "--ls"]) root.querySelector(".reticle").style.removeProperty(v);
     root.querySelector(".zoomer").style.transform = "";
     root.querySelector(".boxes").replaceChildren();
     root.querySelector(".info").replaceChildren();
     this._idle();
+    this._askSeen();
   }
 
   // The names of the camera's zones, if Protect Zones is there to ask.
@@ -692,6 +735,8 @@ class ProtectTrackingCard extends HTMLElement {
         a.place = [(pic.left - z.left) / k, (pic.top - z.top) / k, pic.width / k, pic.height / k];
         a.playing = true;
       } else a.place = [0, 0, W, H];
+      // (the still behind it is shown only while there is no live picture)
+      frame.classList.toggle("playing", !!pic);
       const warn = root.querySelector(".chip.warn");
       const failed = !a.playing && now - a.since > FAIL_MS;
       warn.hidden = !failed;

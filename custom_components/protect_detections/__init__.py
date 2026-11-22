@@ -17,6 +17,7 @@ Frontend access:
   websocket  protect_detections/speakers    cameras that can be talked through
   websocket  protect_detections/overlaps    other detections' boxes during a clip
   websocket  protect_detections/live/...    where things are right now (live.py)
+  websocket  protect_detections/live/seen   what live tracking saw, kept here (sightings.py)
   http       /protect_detections/frontend/<version>/<file>   the cards (cards.py)
   http       /api/protect_detections/thumb/object/<thumbnail id>
              /api/protect_detections/thumb/event/<event id>
@@ -63,6 +64,7 @@ except ImportError:  # Protect Zones isn't installed (or is too old to have it)
 from .cards import CardsView, async_card_urls, load_cards, unload_cards
 from .clips import ClipStore
 from .live import LiveTracks
+from .sightings import SightingRecorder
 from .talk import TalkView, speakers
 
 _LOGGER = logging.getLogger(__name__)
@@ -72,6 +74,7 @@ ISSUE_ZONES = "zones_not_installed"
 SUBSCRIBERS = f"{DOMAIN}_subscribers"
 TALK_VIEW = f"{DOMAIN}_talk_view"
 CARD_URLS = f"{DOMAIN}_card_urls"
+CONF_RECORD = "record_sightings"  # option: listen to every camera's live tracking and keep what it saw
 KEEP_EVENTS = 60
 HISTORY_HOURS = 3
 DETECT_TYPES = ("smartDetectZone", "smartDetectLine")
@@ -140,8 +143,9 @@ def _objects_from_meta(meta: dict[str, Any]) -> list[dict[str, Any]]:
 class DetectionHub:
     """Keeps recent detections and fans changes out to subscribers."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, record: bool = True) -> None:
         self.hass = hass
+        self.record = record
         self.events: OrderedDict[str, dict[str, Any]] = OrderedDict()
         # Open dashboards. Kept outside the hub, so they carry over when the
         # integration is reloaded and get the new hub's detections.
@@ -156,6 +160,7 @@ class DetectionHub:
         self._stopping = False
         self.clips = ClipStore()
         self.live = LiveTracks(hass, lambda: _protect_api(hass))
+        self.sightings = SightingRecorder(hass, self.live, DOMAIN)
         self.history: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     @property
@@ -189,8 +194,32 @@ class DetectionHub:
                 "tap_entity": high or by_uid.get(f"{mac}_1"),
             }
 
+    def smart_cameras(self) -> list[str]:
+        """The cameras (Protect ids) that recognise things, so have live tracking."""
+        api = self.api
+        out = []
+        for cam in api.bootstrap.cameras.values() if api is not None else []:
+            try:
+                smart = bool(cam.feature_flags.smart_detect_types)
+            except AttributeError:
+                smart = False
+            if smart:
+                out.append(cam.id)
+        return out
+
+    def _watch(self) -> None:
+        """Keep a record of what those cameras' live tracking sees (sightings.py)."""
+        if not self.record:
+            return
+        try:
+            self.sightings.watch(self.smart_cameras())
+        except Exception:  # noqa: BLE001 - the record is an extra
+            _LOGGER.warning("Couldn't start recording live sightings", exc_info=True)
+
     async def start(self) -> None:
         self.load_cameras()
+        await self.sightings.load()
+        self._watch()
         try:
             await self._load_history()
         except Exception as err:  # history is a nice-to-have
@@ -210,6 +239,10 @@ class DetectionHub:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await self.sightings.stop()
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Couldn't save the live sightings", exc_info=True)
         await self.live.stop()
         await self.clips.close()
 
@@ -230,6 +263,7 @@ class DetectionHub:
     async def _resync(self) -> None:
         """Back after a gap: detections may have started or ended unseen."""
         self.load_cameras()  # cameras may have been added or renamed too
+        self._watch()
         try:
             now = int(time.time() * 1000)
             types = "&".join(f"types={t}" for t in DETECT_TYPES)
@@ -701,19 +735,11 @@ def ws_live_cameras(hass: HomeAssistant, connection: websocket_api.ActiveConnect
     """The camera entities whose cameras recognise things (so have live boxes)."""
     hub: DetectionHub | None = hass.data.get(DOMAIN)
     out: dict[str, str] = {}
-    api = hub.api if hub else None
-    if api is not None:
-        for cam in api.bootstrap.cameras.values():
-            try:
-                smart = bool(cam.feature_flags.smart_detect_types)
-            except AttributeError:
-                smart = False
-            known = hub.cameras.get(cam.id) or {}
-            if not smart:
-                continue
-            for key in ("entity", "tap_entity"):
-                if known.get(key):
-                    out[known[key]] = cam.id
+    for cam_id in hub.smart_cameras() if hub else []:
+        known = hub.cameras.get(cam_id) or {}
+        for key in ("entity", "tap_entity"):
+            if known.get(key):
+                out[known[key]] = cam_id
     connection.send_result(msg["id"], {"cameras": out})
 
 
@@ -740,6 +766,39 @@ def ws_live_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConne
 
     connection.send_result(msg["id"])
     connection.subscriptions[msg["id"]] = hub.live.subscribe(cam_id, send)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): f"{DOMAIN}/live/seen",
+    vol.Optional("entity"): str,
+    vol.Optional("types"): [str],
+    vol.Optional("limit", default=50): vol.All(int, vol.Range(min=0, max=2000)),
+    vol.Optional("since"): vol.All(int, vol.Range(min=0)),
+})
+@callback
+def ws_live_seen(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """What the cameras' live tracking has seen, as recorded here whether or
+    not a dashboard was open (sightings.py): per camera (Protect's id) when
+    each kind was last seen and whether its feed is connected, then the
+    newest sightings and feed gaps. `limit: 0` gives the first part only."""
+    hub: DetectionHub | None = hass.data.get(DOMAIN)
+    if hub is None:
+        connection.send_error(msg["id"], "not_loaded", "Protect Detections isn't loaded")
+        return
+    only = None
+    if msg.get("entity"):
+        cam_id = _camera_of(hub, msg["entity"])
+        if cam_id is None:
+            connection.send_error(msg["id"], "not_found", "Not a UniFi Protect camera")
+            return
+        only = [cam_id]
+    out = hub.sightings.log.snapshot(only, msg.get("types"), msg["limit"], msg.get("since"))
+    for cam_id, cam in out["cameras"].items():
+        known = hub.cameras.get(cam_id) or {}
+        cam["name"] = known.get("name")
+        cam["entity"] = known.get("entity")
+    out["recording"] = hub.sightings.recording
+    connection.send_result(msg["id"], out)
 
 
 class ClipView(HomeAssistantView):
@@ -784,7 +843,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ir.async_delete_issue(hass, DOMAIN, ISSUE_ZONES)
     if _protect_api(hass) is None:
         raise ConfigEntryNotReady("Waiting for the UniFi Protect integration")
-    hub = DetectionHub(hass)
+    hub = DetectionHub(hass, record=entry.options.get(CONF_RECORD, True))
     hass.data[DOMAIN] = hub
     if not hass.data.get(f"{DOMAIN}_registered"):
         websocket_api.async_register_command(hass, ws_subscribe)
@@ -795,6 +854,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_api.async_register_command(hass, ws_overlaps)
         websocket_api.async_register_command(hass, ws_live_cameras)
         websocket_api.async_register_command(hass, ws_live_subscribe)
+        websocket_api.async_register_command(hass, ws_live_seen)
         hass.data[TALK_VIEW] = TalkView()
         hass.http.register_view(hass.data[TALK_VIEW])
         hass.http.register_view(ThumbnailView())
@@ -805,7 +865,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[CARD_URLS] = await async_card_urls(hass)
     load_cards(hass, hass.data[CARD_URLS])
     await hub.start()
+    entry.async_on_unload(entry.add_update_listener(_options_changed))
     return True
+
+
+async def _options_changed(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

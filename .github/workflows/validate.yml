@@ -53,3 +53,5 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m compileall -q custom_components
+      - name: Tests
+        run: python tests/test_sightings.py

@@ -877,6 +877,83 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(typeof new Trk().getCardSize() === "number" && new Trk().getGridOptions().columns > 0 && ctx.window.customCards.some((x) => x.type === "protect-tracking-card"), "a normal dashboard card (size, grid, listed in the card picker)");
   ctx.localStorage.store = {};
 }
+// --- the tracking card's "Last seen", from the integration's record
+{
+  ctx.document.hidden = false; ctx.localStorage.store = {};
+  const reg = { "camera.p_high_resolution_channel": { device_id: "d1", platform: "unifiprotect" } };
+  const states = { "camera.p_high_resolution_channel": { entity_id: "camera.p_high_resolution_channel", state: "recording", attributes: { channel_id: 0 } } };
+  const asked = []; let answer = null; const subs = new Map();
+  const h = { ...hass, entities: reg, states, devices: { d1: { name: "Front" } },
+    connection: { subscribeMessage: (cb, m) => { subs.set(m.entity, cb); return Promise.resolve(() => subs.delete(m.entity)); } },
+    callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { "camera.p_high_resolution_channel": "p1" } });
+      if (m.type.endsWith("/live/seen")) { asked.push(m); return answer ? answer() : Promise.reject({ code: "unknown_command" }); }
+      if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
+  const mk = async (cfg) => { const c = new Trk(); c.setConfig(cfg); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick(); return c; };
+  const txt = (c) => c._root.querySelector(".idle small").textContent;
+  const H = 3600e3;
+  // the integration's record: 2 h ago on this camera, though this browser never saw anyone
+  answer = () => Promise.resolve({ now: Date.now(), recording: true, cameras: { p1: { connected: true, last: { person: { seen: Date.now() - 2 * H, moved: Date.now() - 2 * H }, vehicle: { seen: Date.now() - 1000 } } }, other: { last: { person: { seen: Date.now() - 1000 } } } }, sightings: [], gaps: [] });
+  let c = await mk({});
+  ok(asked.length === 1 && asked[0].limit === 0 && asked[0].types.join() === "person", "last seen: the integration is asked (the times only, for the kinds watched)");
+  ok(txt(c) === "Last seen 2 h ago", "and its answer is shown, without this browser having seen anyone (other kinds and other cameras don't count): " + txt(c));
+  // newer in the browser's own memory than on the server: the card saw it itself just now
+  subs.get("camera.p_high_resolution_channel")({ clockWall: Date.now() - 400, tracks: [{ id: "p", coord: [1, 1, 50, 50], objectType: "person" }] });
+  ok(c._lastSeen > c._serverSeen, "what the card sees itself is newer and wins");
+  c.disconnectedCallback();
+  // the server's clock is ahead of this device's: still not in the future
+  answer = () => Promise.resolve({ now: Date.now() + 5 * H, cameras: { p1: { last: { person: { seen: Date.now() + 5 * H - 60000 } } } } });
+  c = await mk({}); ok(Math.abs(Date.now() - c._serverSeen - 60000) < 2000, "a server clock that differs from this device's is allowed for");
+  c.disconnectedCallback();
+  // nothing recorded yet
+  answer = () => Promise.resolve({ now: Date.now(), cameras: { p1: { last: {} } } });
+  ctx.localStorage.store = {}; c = await mk({}); ok(txt(c) === "Nothing seen yet", "nothing on record: says so"); c.disconnectedCallback();
+  // an integration from before the record: what this browser remembers, and it isn't asked again
+  answer = null; asked.length = 0; ctx.localStorage.store = {};
+  c = await mk({}); ok(c._noSeen === true && txt(c) === "Nothing seen yet" && !c._state, "an older integration without the record: the card works as before");
+  c._askSeen(true); c._askSeen(true); ok(asked.length === 1, "and doesn't keep asking");
+  subs.get("camera.p_high_resolution_channel")({ clockWall: Date.now() - 400, tracks: [{ id: "p", coord: [1, 1, 50, 50], objectType: "person" }] });
+  ok(Object.keys(ctx.localStorage.store).length === 1, "what it sees is still remembered in the browser");
+  c.disconnectedCallback(); ctx.localStorage.store = {};
+}
+// --- the tracking card: one picture at a time, whatever the card's shape
+{
+  ctx.document.hidden = false; ctx.localStorage.store = {};
+  const reg = { "camera.p_high_resolution_channel": { device_id: "d1", platform: "unifiprotect" } };
+  const states = { "camera.p_high_resolution_channel": { entity_id: "camera.p_high_resolution_channel", state: "recording", attributes: { channel_id: 0 } } };
+  const subs = new Map();
+  const h = { ...hass, entities: reg, states, devices: { d1: { name: "Front" } },
+    connection: { subscribeMessage: (cb, m) => { subs.set(m.entity, cb); return Promise.resolve(() => subs.delete(m.entity)); } },
+    callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { "camera.p_high_resolution_channel": "p1" } });
+      if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
+  const c = new Trk(); c.setConfig({}); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick();
+  const root = c._root, frame = root.querySelector(".frame"), zoomer = root.querySelector(".zoomer");
+  // a card taller than the camera's picture: 800 x 600 for a 16:9 picture, which is then shown 800 x 450 with bars
+  Object.assign(frame, { clientWidth: 800, clientHeight: 600 });
+  zoomer.getBoundingClientRect = () => ({ left: 0, top: 0, width: 800, height: 600 });
+  ok(root.querySelector(".snap").src === "/s" && !frame.classList.contains("playing"), "standing by: the still picture is what is shown");
+  subs.get("camera.p_high_resolution_channel")({ clockWall: Date.now() - 400, tracks: [{ id: "p", coord: [400, 400, 60, 160], objectType: "person" }] });
+  const a = c._active;
+  // (the view is kept whole here: in a browser the picture and the layer it is measured against zoom together, which this stand-in page doesn't do)
+  const look = () => { a.placeAt = 0; a.view.at = 0; a.view.s = 1; c._frame(a); };
+  look();
+  ok(frame.classList.contains("active") && !frame.classList.contains("playing"), "someone there, the live picture not playing yet: the still stands in");
+  const video = Object.assign(new El(), { tagName: "VIDEO", videoWidth: 1600, videoHeight: 900, getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }) });
+  a.stream.querySelectorAll = () => [video]; look();
+  ok(frame.classList.contains("playing"), "the live picture plays: the still is taken away (it fills the card, the live picture is shown whole, so it would show round the edges)");
+  ok(a.place.join() === "0,75,800,450", "the boxes go by where the picture really is (bars above and below): " + a.place.join());
+  // the card changes shape while showing: followed within half a second
+  Object.assign(frame, { clientWidth: 400, clientHeight: 600 }); zoomer.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 600 });
+  video.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 600 }); look();
+  ok(a.place.join() === "0,187.5,400,225" && frame.classList.contains("playing"), "the card changes shape: the boxes follow the picture, still one picture");
+  // the stream stops giving a picture (it is switching): the still stands in again
+  video.videoWidth = 0; look();
+  ok(!frame.classList.contains("playing"), "no live picture for a moment (the stream switching): the still again, not both");
+  video.videoWidth = 1600; look(); ok(frame.classList.contains("playing"), "and away again when it is back");
+  c._leave(); ok(!frame.classList.contains("playing") && !frame.classList.contains("active"), "standing by again: the still is back");
+  c.disconnectedCallback();
+  const css = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8");
+  ok(/\.playing \.snap \{[^}]*opacity: 0/.test(css) && /\.frame \{[^}]*background: #000/.test(css), "what the live picture doesn't cover is the card's plain black");
+}
 // --- tracking tiles on the wall
 {
   ctx.document.addEventListener ||= () => {}; ctx.document.removeEventListener ||= () => {}; ctx.document.hidden = false; ctx.localStorage.store = {};
