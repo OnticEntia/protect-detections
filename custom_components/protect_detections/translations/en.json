@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Protect Detections",
+        "description": "Streams UniFi Protect smart detections (what was seen, object photos, bounding boxes and paths) to dashboards, using the connection of the existing UniFi Protect integration."
+      }
+    },
+    "abort": {
+      "already_configured": "Protect Detections is already set up",
+      "single_instance_allowed": "Protect Detections is already set up",
+      "protect_not_loaded": "Set up the UniFi Protect integration first",
+      "zones_not_installed": "Protect Zones isn't installed. Install it (it shares its connection to Protect with this integration), restart Home Assistant, then add Protect Detections again."
+    }
+  },
+  "issues": {
+    "zones_not_installed": {
+      "title": "Protect Detections needs Protect Zones",
+      "description": "Protect Detections uses the connection to UniFi Protect that the Protect Zones integration provides, and Protect Zones isn't installed.\n\nInstall Protect Zones (through HACS, or by copying it into `custom_components`), restart Home Assistant, then reload Protect Detections."
+    }
+  }
+}
