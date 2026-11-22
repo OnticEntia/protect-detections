@@ -1307,6 +1307,37 @@ ok(w._built && !w._building, "next good config builds after a failure");
     c = await up({ split: 2 }, (t) => [...both(t), { id: "q", coord: [700 - t * 0.02, 250, 100, 300], objectType: "person", stationary: false }]); c.run(2500, (t) => [...both(t), { id: "q", coord: [700 - t * 0.02, 250, 100, 300], objectType: "person", stationary: false }]);
     ok(c._root.querySelector(".frame").classList.contains("split") && !pip(c).classList.contains("on"), "in a split view: no inset"); c.disconnectedCallback();
     c = await up({}, both); c.run(1500, both); c._leave(); ok(!pip(c).classList.contains("on"), "standing by again: gone"); c.disconnectedCallback();
+    // someone walking briskly across the picture: the inset keeps up with the face
+    { const walk = (t) => ({ id: "p", coord: [100 + t * 0.15, 250, 100, 300], objectType: "person", stationary: false, confidence: 90 }); // 150 units a second: across the picture in under 7 s
+      const fwalk = (t) => ({ id: "p:face", coord: [130 + t * 0.15, 262, 30, 40], objectType: "face", of: "p", local: true });
+      // (a position sent at the test's time T is stamped T - 330, and the picture is 300 ms behind: what is on screen at T is what was sent at T + 30)
+      const w = await up({}, (t) => [walk(t), fwalk(t)]); let worst = 0;
+      const centre = () => { const dd = draws(w)[draws(w).length - 1]; return dd[2] + dd[4] / 2; };
+      for (let n = 0; n < 60; n++) { w.T += 33; w.send([walk(w.T), fwalk(w.T)]); w.frame(); if (n > 20) worst = Math.max(worst, Math.abs(centre() - ((130 + (w.T + 30) * 0.15 + 15) / 1000) * 3840)); }
+      const faceW = (30 / 1000) * 3840;
+      ok(worst < faceW * 0.4, `someone walking briskly, a frame at a time: the inset stays on the face (off by ${Math.round(worst)} px of the stream at most; the face is ${Math.round(faceW)} px across). It used to trail by more than the face's width`);
+      // the head turns as they walk on: the inset goes along with the person
+      const before = centre(); const t0 = w.T;
+      for (let n = 0; n < 30; n++) { w.T += 33; w.send([walk(w.T)]); w.frame(); }
+      const moved = centre() - before; const personMoved = ((w.T - t0) * 0.15 / 1000) * 3840;
+      ok(pip(w).classList.contains("on") && Math.abs(moved - personMoved) < faceW * 0.4, `the face not reported for a second while they walk on: the inset goes along with them, showing where the face was on them (moved ${Math.round(moved)} px; they moved ${Math.round(personMoved)})`);
+      { const fe = w._active.els.get("p:face"); const pe = w._active.els.get("p"); const left = (el) => parseFloat(/left:([\d.]+)%/.exec(el.style.cssText)[1]);
+        ok(!!fe && fe.className === "box part" && Math.abs(left(fe) - left(pe) - 3) < 0.4, `and its small brackets on the picture are still on the person's head, not left behind where the face was last found (${(left(fe) - left(pe)).toFixed(1)} % of the picture from the person's left edge; it was 3.0)`); }
+      for (let n = 0; n < 10; n++) { w.T += 33; w.send([walk(w.T), fwalk(w.T)]); w.frame(); }
+      ok(Math.abs(centre() - ((130 + (w.T + 30) * 0.15 + 15) / 1000) * 3840) < faceW * 0.4, "the face is reported again: straight back on it, no jump from somewhere left behind");
+      w.disconnectedCallback(); }
+    // a face found only now and then (every sixth frame), on someone walking: the brackets and the inset don't fall behind in between
+    { const walk = (t) => ({ id: "p", coord: [100 + t * 0.15, 250, 100, 300], objectType: "person", stationary: false, confidence: 90 });
+      const fwalk = (t) => ({ id: "p:face", coord: [130 + t * 0.15, 262, 30, 40], objectType: "face", of: "p", local: true });
+      const w = await up({}, (t) => [walk(t), fwalk(t)]); let worstPip = 0, worstBox = 0; const snap = { mode: "local", source: "local", snapshot: true };
+      const left = (el) => parseFloat(/left:([\d.]+)%/.exec(el.style.cssText)[1]);
+      for (let n = 0; n < 90; n++) { w.T += 33; w.send(n % 6 === 0 ? [walk(w.T), fwalk(w.T)] : [walk(w.T)], snap); w.frame();
+        if (n > 30) { const dd = draws(w)[draws(w).length - 1]; worstPip = Math.max(worstPip, Math.abs(dd[2] + dd[4] / 2 - ((130 + (w.T + 30) * 0.15 + 15) / 1000) * 3840)); const fe = w._active.els.get("p:face"); worstBox = Math.max(worstBox, fe ? Math.abs(left(fe) - (130 + (w.T + 30) * 0.15) / 10) : 99); } }
+      ok(pip(w).classList.contains("on") && worstPip < 115 * 0.4 && worstBox < 1, `a face found only in every sixth packet (the others say it has gone), on someone walking: the inset stays within ${Math.round(worstPip)} px of the stream and the brackets within ${worstBox.toFixed(2)} % of the picture, with no flicker`);
+      w.disconnectedCallback(); }
+    // the face's own brackets on the picture have no easing at all
+    { const css2 = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8"); const rule = (css2.match(/\.bs-reticle \.box\.part \{[^}]*\}/) || [""])[0];
+      ok(rule && !/transition/.test(rule) && !/\.box\.part[^{]*\{[^}]*transition/.test(css2) && !/\n  \.box \{[^}]*transition/.test(css2), "the small face brackets on the picture are placed each frame, with no transition to slow them"); }
     // which corner
     const corner = Trk.pipCorner;
     ok(corner(null, [400, 150, 200, 260], 1000, 562, 180).corner === "br" && corner(null, [700, 300, 250, 260], 1000, 562, 180).corner === "bl", "the corner: bottom right by default; another when the person is there");

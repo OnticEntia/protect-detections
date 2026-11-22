@@ -121,10 +121,14 @@
  * Protect as a face inside the person's box), the face is shown enlarged in
  * a corner, moving with the picture. It is the playing video itself, cut
  * out onto a canvas each frame, as the panes of a split view are: no second
- * stream. Nothing of it is kept: no picture is read back from the canvas,
+ * stream. Faces are not found in every frame: between finds the face is
+ * taken to be where it was on the person and goes along with them, on the
+ * picture and in the inset, for up to two seconds. Nothing of it is kept: no picture is read back from the canvas,
  * saved, or sent anywhere, and it is gone with the frame. It keeps to the
- * corner the person is furthest from, keeps its place for two seconds when
- * the face is not reported (a head turned), and fades when there has been
+ * corner the person is furthest from. It keeps to the face closely (the
+ * positions are the frame's own). When the face is not reported for a
+ * moment (a head turned) it shows where the face was on the person, going
+ * along with them, for two seconds, and fades when there has been
  * none for longer or the person is lost. How sharp it is depends on the
  * stream: a face 3 % of the picture wide is about 115 px across on a 4K
  * main stream and about 38 px on a 720p one (`stream: high` is what it
@@ -217,6 +221,8 @@ const RELEASE_MS = 450; // the reticle opening back out to its place
 const PIP_HOLD_MS = 2000; // the face not reported (a head turned): its place is kept this long
 const PIP_PAD = 1.7; // the cut-out is this many times the face's larger side (some room round it)
 const PIP_MIN = 150; // a card smaller than this (px, its shorter side) has no inset
+const PIP_FOLLOW_MS = 60; // how closely the cut-out keeps to the face (just enough to take the box's jitter out)
+const PIP_SIZE_MS = 250; // ... and how fast it changes size
 const PIP_CORNER_MS = 1200; // the inset stays in its corner at least this long
 const FAIL_MS = 12000; // no picture this long after starting: say so
 const LAST_KEY = "protect-tracking-card:last:";
@@ -827,8 +833,11 @@ class ProtectTrackingCard extends HTMLElement {
     return { corner, left: spots[corner][0], top: spots[corner][1] };
   }
 
-  // One frame of the inset: shown or not, where, and the face cut out of the playing picture.
-  _pip(a, subject, all, place, view, W, H, now, split) {
+  // One frame of the inset: shown or not, where, and the face cut out of
+  // the playing picture. `faceBox` is where the face is (0..1000 of the
+  // picture), found in this frame (`found`) or carried along on the person
+  // since it last was; null when there is none to show.
+  _pip(a, subject, faceBox, found, place, view, W, H, now, split) {
     const root = this._root;
     const wrap = root.querySelector(".pip");
     const line = root.querySelector(".tether");
@@ -838,23 +847,27 @@ class ProtectTrackingCard extends HTMLElement {
     const vw = video && video.videoWidth;
     const vh = video && video.videoHeight;
     const roomy = Math.min(W, H) >= PIP_MIN;
-    const face = !off && !split && roomy ? ProtectTrackingCard.faceOf(subject, all) : null;
+    const face = !off && !split && roomy && subject && faceBox ? { box: faceBox } : null;
     if (subject && p.forId !== subject.t.id) Object.assign(p, { view: null, forId: subject.t.id, at: 0 }); // (another person: not the last one's face)
     if (face && vw && vh) {
-      // where the face is, in the stream's own pixels: a square round it with some room
+      // the cut-out, in the stream's own pixels: a square round the face with some room
       const [fx, fy, fw, fh] = [(face.box[0] / 1000) * vw, (face.box[1] / 1000) * vh, (face.box[2] / 1000) * vw, (face.box[3] / 1000) * vh];
       const want = { x: fx + fw / 2, y: fy + fh / 2, side: Math.max(24, Math.max(fw, fh) * PIP_PAD) };
-      const f = p.view && p.drawnAt && !a.calm ? 1 - Math.exp(-Math.min(250, now - p.drawnAt) / EASE_MS) : 1;
-      p.view = p.view ? { x: p.view.x + (want.x - p.view.x) * f, y: p.view.y + (want.y - p.view.y) * f, side: p.view.side + (want.side - p.view.side) * f } : want;
+      // It keeps to the face closely: the positions are the frame's own, so
+      // anything slower shows as the inset trailing someone who walks. Only
+      // the box's small jitter is taken out; the size changes more gently.
+      const dt = p.view && p.drawnAt ? Math.min(250, now - p.drawnAt) : 0;
+      const near = dt && !a.calm ? 1 - Math.exp(-dt / PIP_FOLLOW_MS) : 1;
+      const grow = dt && !a.calm ? 1 - Math.exp(-dt / PIP_SIZE_MS) : 1;
+      p.view = p.view ? { x: p.view.x + (want.x - p.view.x) * near, y: p.view.y + (want.y - p.view.y) * near, side: p.view.side + (want.side - p.view.side) * grow } : want;
       p.at = now;
-      p.px = fw;
+      if (found) p.px = fw;
     }
-    // (not reported for a moment, a head turned: its place is kept)
-    const show = !off && !split && roomy && !!subject && !!p.view && !!vw && now - p.at < PIP_HOLD_MS;
+    const show = !!face && !!p.view && !!vw;
     wrap.classList.toggle("on", show);
-    line.classList.toggle("on", show && !!face);
+    line.classList.toggle("on", show && found);
     if (!show) {
-      if (now - p.at >= PIP_HOLD_MS) p.view = null;
+      p.view = null;
       p.drawnAt = 0;
       return;
     }
@@ -884,7 +897,7 @@ class ProtectTrackingCard extends HTMLElement {
       cv.getContext("2d").drawImage(video, sx, sy, side, side, 0, 0, px, px);
     } catch (e) {}
     // the line from the face on the picture to the inset's nearest corner
-    if (face) {
+    if (found) {
       const fb = onCard(face.box);
       const [x1, y1] = [fb[0] + fb[2] / 2, fb[1] + fb[3] / 2];
       const x2 = x1 < use.left ? use.left : use.left + size;
@@ -1624,7 +1637,25 @@ class ProtectTrackingCard extends HTMLElement {
     const shown = mine.filter((n) => n === subject || (moving(n) && !a.banned.has(n.t.id)));
     // faces found on those drawn: boxed with them, never followed or counted by themselves
     const drawn = new Set([...shown, ...others].map((n) => String(n.t.id)));
-    const parts = all.filter((n) => n.of != null && drawn.has(n.of));
+    let parts = all.filter((n) => n.of != null && drawn.has(n.of));
+    // The followed person's face. Faces are not found in every frame, and a
+    // box that waits where the face was last found falls behind someone who
+    // walks. So between finds (for up to two seconds) the face is taken to
+    // be where it was on the person, and goes along with them: its brackets
+    // on the picture, and the inset.
+    const fnode = ProtectTrackingCard.faceOf(subject, all);
+    const fresh = !!fnode && at - fnode.t.pts[fnode.t.pts.length - 1][0] <= 150;
+    if (fresh) {
+      const [sx0, sy0, sw0, sh0] = subject.box.map((v, k) => (k > 1 ? Math.max(1, v) : v));
+      a.faceRel = { t: fnode.t, tied: fnode.of != null, sid: subject.t.id, at: now, r: [(fnode.box[0] - sx0) / sw0, (fnode.box[1] - sy0) / sh0, fnode.box[2] / sw0, fnode.box[3] / sh0] };
+    }
+    let faceBox = fresh ? fnode.box : null;
+    if (!fresh && subject && a.faceRel && a.faceRel.sid === subject.t.id && now - a.faceRel.at < PIP_HOLD_MS) {
+      const [sx0, sy0, sw0, sh0] = subject.box;
+      const r = a.faceRel.r;
+      faceBox = [sx0 + r[0] * sw0, sy0 + r[1] * sh0, r[2] * sw0, r[3] * sh0];
+      if (a.faceRel.tied) parts = [...parts.filter((n) => n.t.id !== a.faceRel.t.id), { t: a.faceRel.t, of: String(subject.t.id), box: faceBox, carried: true }];
+    }
 
     // gone for good: back to standing by (a new report keeps it going)
     const linger = Math.max(1, Number(cfg.linger) || 10) * 1000;
@@ -1794,7 +1825,7 @@ class ProtectTrackingCard extends HTMLElement {
       a.viewKey = key;
       root.querySelector(".zoomer").style.transform = key;
     }
-    this._pip(a, subject, all, place, { s, x, y }, W, H, now, split);
+    this._pip(a, subject, faceBox, fresh, place, { s, x, y }, W, H, now, split);
 
     // who it is on: kind, how sure, which zones
     const names = (this._zones && this._zones[a.sub.cam.id]) || {};
