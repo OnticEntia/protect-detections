@@ -2,8 +2,8 @@
 
     python tests/test_interface.py
 
-Protect Tracker uses `hass.data["protect_detections"].smart_cameras()` and
-`.live.subscribe(camera_id, send)`. This reads the source (no Home Assistant
+Protect Tracker uses `hass.data["protect_detections"].smart_cameras()`,
+`.live.subscribe(camera_id, send)` and `.record_live(camera_id, packet)`. This reads the source (no Home Assistant
 needed) and fails if either is renamed or takes other arguments.
 """
 
@@ -45,6 +45,8 @@ ok(isinstance(smart, ast.FunctionDef) and [a.arg for a in smart.args.args] == ["
 ok(assigned("__init__.py", "DetectionHub", "live"), "hub.live is there")
 sub = method("live.py", "LiveTracks", "subscribe")
 ok(isinstance(sub, ast.FunctionDef) and [a.arg for a in sub.args.args] == ["self", "camera_id", "send"], "hub.live.subscribe(camera_id, send) is not a coroutine and takes those two")
+rec = method("__init__.py", "DetectionHub", "record_live")
+ok(isinstance(rec, ast.FunctionDef) and [a.arg for a in rec.args.args] == ["self", "camera_id", "packet"], "hub.record_live(camera_id, packet) is not a coroutine and takes those two")
 src = (base / "__init__.py").read_text()
 ok('DOMAIN = "protect_detections"' in src and "hass.data[DOMAIN] = hub" in src, 'the hub is hass.data["protect_detections"]')
 keys = ast.literal_eval(next(n.value for n in ast.parse((base / "live.py").read_text()).body if isinstance(n, ast.Assign) and n.targets[0].id == "TRACK_KEYS"))

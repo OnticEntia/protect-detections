@@ -211,6 +211,20 @@ class DetectionHub:
                 out.append(cam.id)
         return out
 
+    @callback
+    def record_live(self, camera_id: str, packet: dict[str, Any]) -> None:
+        """For another integration that makes live positions of its own (the
+        Protect Tracker integration, in its local mode): one of its packets
+        for a camera (Protect's id), in the shape of this integration's own,
+        to be kept in the record of sightings (sightings.py) beside Protect's.
+        Call it from the event loop, as often as packets come: it never
+        raises, and writes nothing to disk by itself. Kept as it is: see
+        smart_cameras()."""
+        try:
+            self.sightings.record_live(camera_id, packet)
+        except Exception:  # noqa: BLE001 - the record is an extra; a caller must not suffer for it
+            _LOGGER.debug("A live packet could not be recorded", exc_info=True)
+
     def _watch(self) -> None:
         """Keep a record of what those cameras' live tracking sees (sightings.py)."""
         if not self.record:
@@ -778,13 +792,18 @@ def ws_live_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConne
     vol.Optional("types"): [str],
     vol.Optional("limit", default=50): vol.All(int, vol.Range(min=0, max=2000)),
     vol.Optional("since"): vol.All(int, vol.Range(min=0)),
+    vol.Optional("source"): vol.In(["protect", "local"]),
 })
 @callback
 def ws_live_seen(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
     """What the cameras' live tracking has seen, as recorded here whether or
     not a dashboard was open (sightings.py): per camera (Protect's id) when
     each kind was last seen and whether its feed is connected, then the
-    newest sightings and feed gaps. `limit: 0` gives the first part only."""
+    newest sightings and feed gaps. `limit: 0` gives the first part only.
+    Each sighting says who saw it (`source`: "protect", or "local" for a
+    tracker on this machine) and whether Protect reported it too (`attached`,
+    `protect_id`); `source` asks for one kind only. Last seen has `seen`
+    (either), `seen_protect`, `seen_local` and `seen_unattached`."""
     hub: DetectionHub | None = hass.data.get(DOMAIN)
     if hub is None:
         connection.send_error(msg["id"], "not_loaded", "Protect Detections isn't loaded")
@@ -796,7 +815,7 @@ def ws_live_seen(hass: HomeAssistant, connection: websocket_api.ActiveConnection
             connection.send_error(msg["id"], "not_found", "Not a UniFi Protect camera")
             return
         only = [cam_id]
-    out = hub.sightings.log.snapshot(only, msg.get("types"), msg["limit"], msg.get("since"))
+    out = hub.sightings.log.snapshot(only, msg.get("types"), msg["limit"], msg.get("since"), source=msg.get("source"))
     for cam_id, cam in out["cameras"].items():
         known = hub.cameras.get(cam_id) or {}
         cam["name"] = known.get("name")

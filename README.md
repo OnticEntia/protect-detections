@@ -167,6 +167,8 @@ The integration listens to the live tracking of every camera that recognises thi
 - the newest 100 sightings per camera and kind: start, end, peak confidence, the zones, loiter zones and lines it was in, and Protect's event ids;
 - when a camera's feed was not connected, so "nothing was seen" can be told from "nothing was listening".
 
+With the Protect Tracker integration in its local mode, what its own model sees is recorded here as well. Each sighting says who saw it (`source`: `protect` or `local`) and whether Protect reported the same thing too (`attached`, with Protect's track id and event ids); a thing reported by both is one sighting. So "Last seen" also counts what only the tracker saw, and such a sighting can be found afterwards (`source: local`, `attached: false`). Still times, kinds and places only: no pictures.
+
 It is kept in Home Assistant's `.storage` folder and survives a restart. To read it, call the websocket command `protect_detections/live/seen` (Developer tools → Actions cannot do this; use a card, a script against the websocket API, or the browser console). It takes optional `entity` (one camera), `types`, `limit` (default 50; `0` for the last-seen times only) and `since` (ms).
 
 **What it costs:** one extra connection to the Protect console per camera that recognises things, open all the time, carrying a few small messages a second while that camera tracks something. **To turn it off:** Settings → Devices & services → Protect Detections → Configure. Live tracking is then listened to only while a dashboard shows it, and "Last seen" goes back to what each browser saw itself.

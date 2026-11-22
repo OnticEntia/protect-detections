@@ -14,6 +14,13 @@ This listens to every camera that recognises things, all the time, and keeps:
   gaps      when a camera's feed was not connected, so "nothing was seen" can
             be told from "nobody was listening"
 
+A tracker on this machine that makes its own positions (the Protect Tracker
+integration, in its "local" mode) can hand them in as well
+(DetectionHub.record_live): its sightings are kept beside Protect's, marked
+with their source, and with whether Protect ever reported the same thing
+(`attached`, and then Protect's track id and event ids). One thing reported
+by both is one sighting. Still times, kinds and places only: no pictures.
+
 It is saved now and then and when Home Assistant stops, and read back when it
 starts. A kind is kept as Protect names it, whatever that is, so a name the
 cards don't know shows up here rather than disappearing.
@@ -63,7 +70,8 @@ class SightingLog:
     def __init__(self, saved: dict[str, Any] | None = None, now: int | None = None) -> None:
         self.last: dict[str, dict[str, dict[str, int]]] = {}  # camera -> kind -> {seen, moved}
         self.done: dict[str, dict[str, list[dict[str, Any]]]] = {}  # camera -> kind -> oldest first
-        self.open: dict[tuple[str, str], dict[str, Any]] = {}  # (camera, track id) -> being seen now
+        self.open: dict[tuple[str, str, str], dict[str, Any]] = {}  # (camera, source, track id) -> being seen now
+        self.claimed: dict[tuple[str, str], tuple[str, str, str]] = {}  # (camera, Protect track id) -> the local sighting attached to it
         self.gaps: dict[str, list[dict[str, Any]]] = {}  # camera -> oldest first
         self.state: dict[str, dict[str, Any]] = {}  # camera -> {connected, since}
         self.dirty = False
@@ -72,48 +80,121 @@ class SightingLog:
 
     # ------------------------------------------------------------- feeding
 
-    def feed(self, camera: str, payload: dict[str, Any], now: int | None = None) -> None:
-        """One message of the live relay for a camera (tracks, or a status)."""
+    def feed(self, camera: str, payload: dict[str, Any], now: int | None = None, source: str = "protect") -> None:
+        """One message for a camera (tracks, or a status): from this
+        integration's own relay of Protect's reports (source "protect"), or
+        from a tracker on this machine that makes its own (source "local").
+
+        A local track may carry the Protect track it has been matched to
+        (`protect_id`): from then on that is the same thing seen twice, and it
+        is counted once, as the local sighting, marked `attached`."""
         now = _now() if now is None else now
+        local = source == "local"
         if payload.get("status"):
-            self.status(camera, payload["status"], payload.get("error"), now)
+            if not local:  # (the feed gaps kept are the Protect relay's)
+                self.status(camera, payload["status"], payload.get("error"), now)
             return
         at = payload.get("arrived")
-        at = int(at) if isinstance(at, (int, float)) and at > 0 else now
+        at = int(at) if isinstance(at, (int, float)) and not isinstance(at, bool) and at > 0 else now
         self.sweep(at)
-        for tr in payload.get("tracks") or []:
-            if not isinstance(tr, dict):
+        tracks = payload.get("tracks")
+        for tr in tracks if isinstance(tracks, list) else []:
+            if not isinstance(tr, dict) or tr.get("id") is None:
                 continue
             kind = str(tr.get("objectType") or "unknown")
-            key = (camera, str(tr.get("id")))
+            tid = str(tr.get("id"))[:80]  # (whatever the sender's ids are: text, numbers)
+            pid = None
+            if local:
+                pid = tr.get("protect_id", tr.get("protectId"))
+                # (a report of Protect's merely passed on keeps Protect's id as its own)
+                if pid is None and tr.get("local") is False:
+                    pid = tid
+                pid = None if pid is None or pid == "" else str(pid)[:80]
+            else:
+                # Protect's own report of something a local sighting is attached to: that sighting's
+                owner = self.claimed.get((camera, tid))
+                if owner is not None and owner in self.open:
+                    self._note(self.open[owner], tr, payload, at, kind, camera, own=False)
+                    continue
+            key = (camera, "local" if local else "protect", tid)
             cur = self.open.get(key)
             if cur is not None and cur["type"] != kind:
-                self._finish(key)  # the same track, now called something else
-                cur = None
+                if local:
+                    cur["type"] = kind  # (a local track gets its kind from Protect when attached: still the one thing)
+                else:
+                    self._finish(key)  # the same track, now called something else
+                    cur = None
             if cur is None:
                 cur = self.open[key] = {
-                    "camera": camera, "track": key[1], "type": kind, "start": at, "end": at,
+                    "camera": camera, "track": tid, "type": kind, "start": at, "end": at,
                     "confidence": 0, "reports": 0, "moving": False, "desc": "",
                     "zones": [], "loiter_zones": [], "lines": [], "events": [], "edges": [],
+                    "source": "local" if local else "protect", "attached": False, "protect_id": None,
                 }
-            cur["end"] = max(cur["end"], at)
+            if local and pid is not None and (tr.get("attached") is not False):
+                if cur["protect_id"] != pid:
+                    cur["protect_id"] = pid
+                    self._absorb(camera, pid, key)
+                cur["attached"] = True
+                self.claimed[(camera, pid)] = key
+            elif local and tr.get("attached") is True:
+                cur["attached"] = True
+            self._note(cur, tr, payload, at, kind, camera)
+
+    def _note(self, cur: dict[str, Any], tr: dict[str, Any], payload: dict[str, Any], at: int, kind: str, camera: str, own: bool = True) -> None:
+        """One report of a thing, added to its sighting (`own`: by the
+        sighting's own source; else Protect's report of an attached one)."""
+        cur["end"] = max(cur["end"], at)
+        if own:
             cur["reports"] += 1
-            conf = tr.get("confidence")
-            if isinstance(conf, (int, float)) and conf > cur["confidence"]:
-                cur["confidence"] = conf
-            if tr.get("desc"):
-                cur["desc"] = str(tr["desc"])[:60]
-            _add(cur["zones"], tr.get("zones"))
-            _add(cur["loiter_zones"], tr.get("loiterZones"))
-            _add(cur["lines"], tr.get("lines"))
-            _add(cur["events"], payload.get("eventId"))
-            _add(cur["edges"], payload.get("edgeType"))
-            last = self.last.setdefault(camera, {}).setdefault(kind, {})
-            last["seen"] = max(last.get("seen", 0), at)
-            if not tr.get("stationary"):
-                cur["moving"] = True
-                last["moved"] = max(last.get("moved", 0), at)
-            self.dirty = True
+        conf = tr.get("confidence")
+        if isinstance(conf, (int, float)) and not isinstance(conf, bool) and conf > cur["confidence"]:
+            cur["confidence"] = conf
+        if tr.get("desc") and isinstance(tr["desc"], str):
+            cur["desc"] = tr["desc"][:60]
+        _add(cur["zones"], tr.get("zones"))
+        _add(cur["loiter_zones"], tr.get("loiterZones"))
+        _add(cur["lines"], tr.get("lines"))
+        _add(cur["events"], tr.get("eventId"))
+        _add(cur["events"], payload.get("eventId"))
+        _add(cur["edges"], payload.get("edgeType"))
+        kind = cur["type"] if not own else kind
+        last = self.last.setdefault(camera, {}).setdefault(kind, {})
+        last["seen"] = max(last.get("seen", 0), at)
+        which = "seen_local" if cur.get("source") == "local" else "seen_protect"
+        last[which] = max(last.get(which, 0), at)
+        if cur.get("source") == "local" and not cur.get("attached"):
+            last["seen_unattached"] = max(last.get("seen_unattached", 0), at)  # (the tracker's alone: Protect hasn't reported it)
+        if not tr.get("stationary"):
+            cur["moving"] = True
+            last["moved"] = max(last.get("moved", 0), at)
+        self.dirty = True
+
+    def _absorb(self, camera: str, pid: str, into: tuple[str, str, str]) -> None:
+        """A local sighting has been matched to a Protect track: what Protect's
+        own reports of it have made a sighting of (open, or only just closed)
+        is that same thing, and goes into the local one."""
+        cur = self.open[into]
+        twin = self.open.pop((camera, "protect", pid), None)
+        if twin is None:
+            for rows in (self.done.get(camera) or {}).values():
+                for k in range(len(rows) - 1, max(-1, len(rows) - 6), -1):
+                    row = rows[k]
+                    if row.get("track") == pid and row.get("source", "protect") == "protect" and row["end"] >= cur["start"] - IDLE_MS:
+                        twin = rows.pop(k)
+                        break
+                if twin is not None:
+                    break
+        if twin is None:
+            return
+        cur["start"] = min(cur["start"], twin["start"])
+        cur["end"] = max(cur["end"], twin["end"])
+        cur["confidence"] = max(cur["confidence"], twin.get("confidence") or 0)
+        cur["moving"] = cur["moving"] or bool(twin.get("moving"))
+        if not cur["desc"]:
+            cur["desc"] = twin.get("desc") or ""
+        for k in ("zones", "loiter_zones", "lines", "events", "edges"):
+            _add(cur[k], twin.get(k) or [])
 
     def sweep(self, now: int | None = None) -> None:
         """Close the sightings of things that are no longer reported. (The
@@ -123,10 +204,12 @@ class SightingLog:
         for key in [k for k, s in self.open.items() if now - s["end"] > IDLE_MS]:
             self._finish(key)
 
-    def _finish(self, key: tuple[str, str]) -> None:
+    def _finish(self, key: tuple[str, str, str]) -> None:
         cur = self.open.pop(key, None)
         if cur is None:
             return
+        for claim in [c for c, owner in self.claimed.items() if owner == key]:
+            del self.claimed[claim]
         rows = self.done.setdefault(cur["camera"], {}).setdefault(cur["type"], [])
         rows.append(cur)
         del rows[:-KEEP]
@@ -191,7 +274,7 @@ class SightingLog:
         for cam, kinds in (saved.get("last") or {}).items():
             if isinstance(kinds, dict):
                 self.last[str(cam)] = {
-                    str(k): {a: int(b) for a, b in v.items() if a in ("seen", "moved") and isinstance(b, (int, float))}
+                    str(k): {a: int(b) for a, b in v.items() if a in ("seen", "moved", "seen_protect", "seen_local", "seen_unattached") and isinstance(b, (int, float))}
                     for k, v in kinds.items()
                     if isinstance(v, dict)
                 }
@@ -223,6 +306,7 @@ class SightingLog:
         limit: int = 50,
         since: int | None = None,
         now: int | None = None,
+        source: str | None = None,
     ) -> dict[str, Any]:
         """What a card or a person looking into it gets: per camera when each
         kind was last seen and whether its feed is connected, then the newest
@@ -254,6 +338,10 @@ class SightingLog:
                 for s in self.open.values()
                 if s["camera"] in cams and (kinds is None or s["type"] in kinds)
             ]
+            # (each says who saw it, and whether Protect reported it too; those kept from before are Protect's)
+            rows = [{"source": "protect", "attached": False, "protect_id": None, **s} for s in rows]
+            if source:
+                rows = [s for s in rows if s["source"] == source]
             if since:
                 rows = [s for s in rows if s["end"] >= since]
                 gaps = [g for g in gaps if (g.get("to") or now) >= since]
@@ -295,6 +383,14 @@ class SightingRecorder:
 
     def _feed(self, camera: str, payload: dict[str, Any]) -> None:
         self.log.feed(camera, payload)
+        self._save_later()
+
+    def record_live(self, camera: str, payload: dict[str, Any]) -> None:
+        """A packet of a local tracker's, for the record (only while recording
+        is on; saved no more often than the rest)."""
+        if not self.recording or not isinstance(camera, str) or not isinstance(payload, dict):
+            return
+        self.log.feed(camera, payload, source="local")
         self._save_later()
 
     def _save_later(self) -> None:
