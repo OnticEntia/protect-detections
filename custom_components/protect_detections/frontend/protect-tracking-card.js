@@ -189,7 +189,8 @@ function staticTexture() {
       else if (r < 0.6) half += `M${x} ${y}h1v1h-1z`;
     }
   }
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${STATIC_N} ${STATIC_N}" shape-rendering="crispEdges"><path d="${full}"/><path opacity=".45" d="${half}"/></svg>`;
+  // (with a size of its own: some phone browsers won't lay out a drawing that has none)
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${STATIC_N}" height="${STATIC_N}" viewBox="0 0 ${STATIC_N} ${STATIC_N}" shape-rendering="crispEdges"><path d="${full}"/><path opacity=".45" d="${half}"/></svg>`;
   staticUrl = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
   return staticUrl;
 }
@@ -501,7 +502,12 @@ const STYLE = `
     -webkit-mask-size: var(--tile) var(--tile); mask-size: var(--tile) var(--tile); -webkit-mask-position: 0 0; mask-position: 0 0;
     animation: trk-static .5s step-end infinite; transition: opacity .32s steps(4, jump-none); }
   .frame.s-static .noise { display: block; }
-  .frame.s-static:not(.active) .snap, .frame.s-static.warmlive:not(.active) .zoomer { filter: grayscale(1) contrast(1.25) brightness(1.05); mix-blend-mode: screen; opacity: .85; }
+  /* (a browser that can't mask would show a plain slab of the accent colour: there, no static at all) */
+  @supports not ((mask-image: none) or (-webkit-mask-image: none)) { .frame.s-static .noise { display: none; } }
+  .frame.s-static:not(.active) .snap, .frame.s-static.warmlive:not(.active) .zoomer { filter: grayscale(1) contrast(1.35) brightness(.9); mix-blend-mode: screen; opacity: .75; }
+  /* the reticle is white on the static (the accent would be lost in it), with a dark edge */
+  .frame.s-static .scan { --acc: #fff; }
+  .frame.s-static .scan .reticle::before { filter: drop-shadow(0 0 2px #000) drop-shadow(0 0 1px #000); }
   /* (following: the static drops out in steps, as a signal locking; standing by again it floods back the same way) */
   .frame.s-static.active .noise { opacity: 0; }
   .frame.s-static .scan { background: radial-gradient(ellipse at center, rgba(0,0,0,0) 35%, rgba(0,0,0,.5) 100%); }
