@@ -59,6 +59,18 @@
  * camera-wall-card shows one of these per camera that recognises things, as
  * a tile among its feeds (its config `tracking:`).
  *
+ * Whom it follows. The thing that woke it is its subject, and the view
+ * stays on that one alone: through its standing still, through short
+ * losses, and through its reports going on under another id (Protect's and
+ * Protect Tracker's can differ). Things standing still never wake the card,
+ * never become the subject and never widen the view: a thing counts as
+ * moving while Protect said so in the last two seconds. When the subject has
+ * gone and something else of a watched kind is moving, the view goes over
+ * to the nearest such thing, once; a tap on another box makes that one the
+ * subject. With nothing moving left it stands by again after `linger`,
+ * whatever is parked in view. A subject that is not a person and has stood
+ * still for 20 s counts as parked and is let go.
+ *
  * Standing by, no video is playing: the card listens to where Protect says
  * things are (while it is on screen and the page is in front; not otherwise)
  * and shows a still picture now and then. Tapping it opens the camera.
@@ -84,6 +96,11 @@ const STANDBY = ["radar", "pulse", "scanline", "none"]; // how standing by looks
 const LOCK_MS = 520; // the "there they are" beat as the picture comes in
 const HOLD_MS = 1500; // the view stays this long where they were last seen, before easing out
 const EASE_MS = 350;
+// The subject: the one thing the card stays on.
+const MOVING_MS = 2000; // a thing counts as on the move while a report said so this recently
+const SWITCH_MS = 900; // the subject gone this long: another moving thing may be taken instead
+const HANDOVER_MS = 1500; // the subject's reports going on under another id: taken up within this, where it was
+const PARKED_MS = 20000; // a subject that isn't a person and has stood still this long is let go (it has parked)
 const FAIL_MS = 12000; // no picture this long after starting: say so
 const LAST_KEY = "protect-tracking-card:last:";
 
@@ -257,7 +274,7 @@ const STYLE = `
     pointer-events: auto; }
   .box.part { border-width: calc(1.5px * var(--k, 1)); border-radius: 50% / 45%; pointer-events: none; }
   .box.other { border-style: dashed; border-width: calc(1px * var(--k, 1)); opacity: .6; pointer-events: none; }
-  .box.picked { box-shadow: 0 0 0 calc(1px * var(--k, 1)) #fff; }
+  .box.also { border-width: calc(1px * var(--k, 1)); opacity: .75; }
   /* standing by: the words, small, along the bottom */
   .idle { position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
     padding: 22px 12px 9px; background: linear-gradient(to top, rgba(0,0,0,.78), rgba(0,0,0,0)); text-shadow: 0 1px 2px #000;
@@ -775,7 +792,8 @@ class ProtectTrackingCard extends HTMLElement {
     const own = (msg.tracks || []).filter((tr) => tr && tr.of == null);
     // (source: local means what Protect Tracker's own model made, and nothing else)
     const only = this._config.source === "local";
-    const hit = own.find((tr) => types.includes(tr.objectType) && (!only || tr.local === true));
+    // (and something standing still wakes nothing: a parked car, a bike on the porch)
+    const hit = own.find((tr) => types.includes(tr.objectType) && !tr.stationary && (!only || tr.local === true));
     const now = Date.now();
     if (!hit) {
       // (messages can come thirty a second: the dots needn't)
@@ -793,7 +811,7 @@ class ProtectTrackingCard extends HTMLElement {
         localStorage.setItem(LAST_KEY + this._lastKey(), String(now));
       } catch (e) {}
     }
-    if (!this._active) this._enter(sub, hit.coord);
+    if (!this._active) this._enter(sub, hit.coord, hit.id);
   }
 
   // Standing by with `show_others`: the other things Protect is tracking, as
@@ -865,12 +883,12 @@ class ProtectTrackingCard extends HTMLElement {
   }
 
   // Someone is there: the live picture, staying on them.
-  _enter(sub, coord) {
+  _enter(sub, coord, id) {
     const cam = sub.cam;
     const warm = this._warm && this._warm.cam.id === cam.id ? this._warm : null;
     const entity = warm ? warm.entity : this._entity(cam);
     const stream = warm ? warm.stream : this._stream(entity);
-    const a = (this._active = { sub, entity, stream, since: Date.now(), seen: Date.now(), view: { s: 1, cx: null, cy: null, at: 0, want: null }, els: new Map(), pick: null, place: null, placeAt: 0 });
+    const a = (this._active = { sub, entity, stream, since: Date.now(), seen: Date.now(), view: { s: 1, cx: null, cy: null, at: 0, want: null }, els: new Map(), subject: id, subjectAt: Date.now(), subjectBox: Array.isArray(coord) && coord.length === 4 ? coord.map(Number) : null, place: null, placeAt: 0 });
     const root = this._root;
     // the reticle jumps to where they are and flashes while the picture
     // comes in over it (the stream is already starting: this delays nothing)
@@ -954,10 +972,44 @@ class ProtectTrackingCard extends HTMLElement {
     const whole = all.filter((n) => n.of == null);
     const mine = whole.filter((n) => cfg.types.includes(n.t.type)); // (standing still counts too)
     const others = cfg.show_others ? whole.filter((n) => !cfg.types.includes(n.t.type) && lt.moment(behind) - n.t.moved <= 5000) : [];
+    // --- the subject (see the top of this file)
+    const at = lt.moment(behind);
+    const moving = (n) => at - n.t.moved <= MOVING_MS;
+    const centre = (b) => [b[0] + b[2] / 2, b[1] + b[3] / 2];
+    const far = (b) => {
+      const [x, y] = centre(b);
+      const [px, py] = a.subjectBox ? centre(a.subjectBox) : [x, y];
+      return Math.hypot(x - px, y - py);
+    };
+    let subject = mine.find((n) => n.t.id === a.subject) || null;
+    if (subject && subject.t.type !== "person" && at - subject.t.moved > PARKED_MS) subject = null; // it has parked
+    if (!subject) {
+      const tr = lt.tracks.get(a.subject);
+      const early = !!tr && tr.pts.length > 0 && tr.pts[0][0] > at; // (reported, but that moment isn't on screen yet)
+      const parked = !!tr && at - tr.moved > PARKED_MS;
+      if (!early) {
+        const free = mine.filter((n) => moving(n) && n.t.id !== a.subject);
+        free.sort((p, q) => far(p.box) - far(q.box));
+        const next = free[0];
+        // its reports going on under another id, right where it was: the same subject
+        const same = next && a.subjectBox && now - a.subjectAt < HANDOVER_MS && far(next.box) <= Math.max(80, a.subjectBox[2], a.subjectBox[3]);
+        if (next && (same || parked || now - a.subjectAt > SWITCH_MS)) {
+          a.subject = next.t.id;
+          subject = next;
+        }
+      }
+    }
+    if (subject) {
+      a.subjectAt = now;
+      a.subjectBox = subject.box;
+    }
+    // what keeps the picture up: the subject, or something moving that it could go over to
+    if (subject || mine.some(moving)) a.seen = now;
+    // boxed: the subject, and whatever else of a watched kind is on the move (parked things are not)
+    const shown = mine.filter((n) => n === subject || moving(n));
     // faces found on those drawn: boxed with them, never followed or counted by themselves
-    const drawn = new Set([...mine, ...others].map((n) => String(n.t.id)));
+    const drawn = new Set([...shown, ...others].map((n) => String(n.t.id)));
     const parts = all.filter((n) => n.of != null && drawn.has(n.of));
-    if (mine.length) a.seen = now;
 
     // gone for good: back to standing by (a new report keeps it going)
     const linger = Math.max(1, Number(cfg.linger) || 10) * 1000;
@@ -1005,22 +1057,23 @@ class ProtectTrackingCard extends HTMLElement {
     const layer = root.querySelector(".boxes");
     layer.style.cssText = `left:${place[0].toFixed(1)}px;top:${place[1].toFixed(1)}px;width:${place[2].toFixed(1)}px;height:${place[3].toFixed(1)}px;--k:${(1 / (a.view.s || 1)).toFixed(4)}`;
     const keep = new Set();
-    for (const n of [...mine, ...others, ...parts]) {
+    for (const n of [...shown, ...others, ...parts]) {
       const { t, box } = n;
       keep.add(t.id);
       let el = a.els.get(t.id);
       if (!el) {
         el = document.createElement("div");
         el.onclick = (ev) => {
-          // stay on this one (again: on all of them)
+          // this one is the subject from now on
           ev.stopPropagation();
-          a.pick = a.pick === t.id ? null : t.id;
+          a.subject = t.id;
+          a.subjectAt = Date.now();
         };
         layer.appendChild(el);
         a.els.set(t.id, el);
       }
       const other = n.of == null && !cfg.types.includes(t.type);
-      el.className = `box${other ? " other" : ""}${n.of != null ? " part" : ""}${a.pick === t.id ? " picked" : ""}`;
+      el.className = `box${other ? " other" : ""}${n.of != null ? " part" : ""}${!other && n.of == null && n !== subject ? " also" : ""}`;
       el.style.cssText = `left:${(box[0] / 10).toFixed(2)}%;top:${(box[1] / 10).toFixed(2)}%;width:${(box[2] / 10).toFixed(2)}%;height:${(box[3] / 10).toFixed(2)}%;--c:${LIVE_COLORS[t.type] || "#e5e7eb"}`;
     }
     for (const [id, el] of a.els) {
@@ -1029,22 +1082,21 @@ class ProtectTrackingCard extends HTMLElement {
       a.els.delete(id);
     }
 
-    // the view: on the one picked while it is there, else round all of them
-    const picked = mine.find((n) => n.t.id === a.pick);
-    const group = picked ? [picked] : mine;
+    // the view: on the subject, and on nothing else
+    const group = subject ? [subject] : [];
     const v = a.view;
     let want = null;
-    if (group.length) {
-      const x0 = Math.min(...group.map((n) => n.box[0]));
-      const y0 = Math.min(...group.map((n) => n.box[1]));
-      const x1 = Math.max(...group.map((n) => n.box[0] + n.box[2]));
-      const y1 = Math.max(...group.map((n) => n.box[1] + n.box[3]));
-      const w = Math.max(1, x1 - x0);
-      const h = Math.max(1, y1 - y0);
-      const s = Math.max(1, Math.min(Number(cfg.max_zoom) || 4, 1000 / (w * 3), 1000 / (h * 2)));
+    if (subject) {
+      const [x0, y0, w0, h0] = subject.box;
+      const w = Math.max(1, w0);
+      const h = Math.max(1, h0);
+      let s = Math.max(1, Math.min(Number(cfg.max_zoom) || 4, 1000 / (w * 3), 1000 / (h * 2)));
+      // (how far in: left alone while it differs little, so the picture doesn't breathe with the box's wobble)
+      if (v.want && Math.abs(s - v.want[0]) / v.want[0] < 0.08) s = v.want[0];
       want = [s, place[0] + ((x0 + w / 2) / 1000) * place[2], place[1] + ((y0 + h / 2) / 1000) * place[3]];
       v.want = want;
-    } else if (v.want && now - a.seen < HOLD_MS) want = v.want; // just lost: stay a moment
+      v.wantAt = now;
+    } else if (v.want && now - (v.wantAt || 0) < HOLD_MS) want = v.want; // just lost: stay a moment
     if (!want) {
       v.want = null;
       want = [1, W / 2, H / 2];

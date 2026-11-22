@@ -973,20 +973,20 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(+z[3] > 2 && Math.abs(mid[0] - (0.584 + 0.03) * 800) < 12 && Math.abs(mid[1] - (0.3 + 0.08) * 450) < 12, "zoomed in on the person, who sits in the middle");
   ok(a.els.size === 1 && a.els.has("p1") && a.els.get("p1").className === "box", "only the person is boxed");
   ok(root.querySelector(".info").children.map((x) => x.textAll).join("|") === "Person 91% · Porch, Lawn", "kind, how sure, and the zones by name (from Protect Zones)");
-  // two people: both in view; tap one to stay on it
+  // two people: it stays on the one that woke it; a tap on the other goes over to that one
   send(1500, [tr("p1", "person", 580), tr("p2", "person", 200)]); send(1750, [tr("p1", "person", 600), tr("p2", "person", 210)]);
   frameAt(T0 + 2700, 60);
   const z2 = /scale\(([\d.]+)\)/.exec(root.querySelector(".zoomer").style.transform) || [0, 1];
-  ok(a.els.size === 2 && +z2[1] < +z[3], "two people: the view widens to keep both in");
+  ok(a.els.size === 2 && Math.abs(+z2[1] - +z[3]) < 0.35 && a.subject === "p1" && a.els.get("p1").className === "box" && a.els.get("p2").className === "box also", "a second person: boxed too (lightly), but the view stays on the first and doesn't widen");
   a.els.get("p2").onclick({ stopPropagation() {} }); frameAt(T0 + 2700, 60);
   const z3 = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(root.querySelector(".zoomer").style.transform);
-  ok(a.pick === "p2" && Math.abs((400 - z3[1]) / z3[3] - (0.21 + 0.03) * 800) < 15 && a.els.get("p2").className === "box picked" && more.length === 0, "tapping a box stays on that one (and doesn't open the camera)");
-  a.els.get("p2").onclick({ stopPropagation() {} }); ok(a.pick === null, "tapping it again: all of them");
+  ok(a.subject === "p2" && Math.abs((400 - z3[1]) / z3[3] - (0.21 + 0.03) * 800) < 15 && a.els.get("p2").className === "box" && a.els.get("p1").className === "box also" && more.length === 0, "tapping the other box: the view goes over to that one (and the camera isn't opened)");
+  a.els.get("p1").onclick({ stopPropagation() {} }); ok(a.subject === "p1", "and back with a tap on the first");
   // tap on the card: the camera's own dialog
   frame.dispatchEvent(new Ev("click")); ok(more.join() === "camera.p_high_resolution_channel", "tapping the card opens the camera");
   // gone: holds, eases out, stops after the linger
   frameAt(T0 + 3200, 3); ok(root.querySelector(".zoomer").style.transform.includes("scale("), "just gone: the view stays a moment");
-  a.seen = T0 + 500; a.sub.matchAt = Date.now() - 4000; frameAt(Date.now(), 80);
+  a.seen = T0 + 500; a.view.wantAt = 0; a.sub.matchAt = Date.now() - 4000; frameAt(Date.now(), 80);
   ok(c._active === a && !root.querySelector(".zoomer").style.transform, "then back to the whole picture, the stream still running");
   a.seen = Date.now() - 11000; a.sub.matchAt = Date.now() - 11000; frameAt(Date.now());
   ok(!c._active && video.children.length === 0 && !frame.classList.contains("active") && txt(c, "small").startsWith("Last seen"), "after the linger: the stream is stopped, standing by again, with when they were last seen");
@@ -1008,6 +1008,102 @@ ok(w._built && !w._building, "next good config builds after a failure");
   c = await mk({ camera: "camera.q_high_resolution_channel" }, live); ok(c._state === "nocams" && txt(c, "span") === "This camera doesn't recognise things", "a pinned camera that doesn't recognise things: says so"); c.disconnectedCallback();
   ok(typeof new Trk().getCardSize() === "number" && new Trk().getGridOptions().columns > 0 && ctx.window.customCards.some((x) => x.type === "protect-tracking-card"), "a normal dashboard card (size, grid, listed in the card picker)");
   ctx.localStorage.store = {};
+}
+// --- the tracking card's subject: one thing, kept to; parked things never
+{
+  ctx.document.hidden = false; ctx.localStorage.store = {};
+  const P = "camera.p_high_resolution_channel";
+  const reg = { [P]: { device_id: "d1", platform: "unifiprotect" } };
+  const states = { [P]: { entity_id: P, state: "recording", attributes: { channel_id: 0 } } };
+  const mkc = async (cfg) => { let push = null;
+    const h = { ...hass, entities: reg, states, devices: { d1: { name: "Front" } },
+      connection: { subscribeMessage: (cb, m) => { if (m.type.startsWith("protect_tracker")) return Promise.reject({ code: "unknown_command" }); push = cb; return Promise.resolve(() => {}); } },
+      callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { [P]: "p1" } }); if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
+    const c = new Trk(); c.setConfig({ linger: 5, ...cfg }); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick();
+    Object.assign(c._root.querySelector(".frame"), { clientWidth: 1000, clientHeight: 562 });
+    // a clock of the test's own: T is "now" for the card, and the picture counts as 300 ms behind (no WebRTC here)
+    c.T0 = Date.now(); c.T = 0;
+    c.send = (tracks, extra = {}) => { const real = Date.now; Date.now = () => c.T0 + c.T; try { push({ clockWall: c.T0 + c.T - 330, tracks, ...extra }); } finally { Date.now = real; } };
+    c.frame = (n = 1) => { const real = Date.now; Date.now = () => c.T0 + c.T; try { const a = c._active; for (let k = 0; k < n && c._active === a && a; k++) { a.placeAt = 0; a.view.at = a.view.at ? c.T0 + c.T - 100 : 0; c._frame(a); } } finally { Date.now = real; } };
+    // time goes on in steps of 100 ms, with what is reported at each (a function of the time), then a frame
+    c.run = (ms, tracksAt, extra) => { for (let end = c.T + ms; c.T < end; ) { c.T += 100; const t = tracksAt(c.T); if (t) c.send(t, extra); c.frame(); } };
+    c.centre = () => { const z = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(c._root.querySelector(".zoomer").style.transform); return z ? [Math.round(((500 - z[1]) / z[3]) / 10) * 10, +z[3]] : [500, 1]; };
+    return c; };
+  const bike = { id: "bike", coord: [500, 600, 220, 300], objectType: "vehicle", stationary: true, desc: "bike" };
+  const car = (id, x, extra = {}) => ({ id, coord: [x, 150, 100, 60], objectType: "vehicle", stationary: false, ...extra });
+  const ids = (c) => [...c._active.els].map(([id, el]) => id + (el.className === "box" ? "" : "(" + el.className.replace("box ", "") + ")")).sort().join();
+
+  // watching vehicles, with a bike parked in view the whole time
+  let c = await mkc({ types: ["vehicle"] });
+  c.run(3000, () => [bike]);
+  ok(!c._active, "a parked thing of a watched kind, reported over and over: the card stays standing by");
+  // a car drives through, left to right
+  c.run(2500, (t) => [bike, car("c1", 100 + (t - 3000) * 0.2)]);
+  ok(!!c._active && c._active.subject === "c1", "a car comes: the card wakes, and that car is its subject");
+  let [cx, k] = c.centre();
+  ok(k > 1.5 && Math.abs(cx - (100 + (c.T - 3000 - 300) * 0.2 + 50)) < 40 && ids(c) === "c1", `the view is on the car alone, and the bike is neither framed nor boxed (centre ${cx}, zoom ${k})`);
+  // the car leaves; the bike is still there
+  const leftAt = c.T; c.run(1200, () => [bike]);
+  ok(!!c._active && c._active.subject === "c1" && ids(c) === "", "the car has gone: nothing is boxed, and the bike doesn't become the subject");
+  [cx, k] = c.centre(); ok(cx > 660, `the view stays a moment where the car was last, and doesn't go to the bike at 610 (centre ${cx})`);
+  c.run(2500, () => [bike]); ok(c.centre()[1] < 1.2, "then it eases back out to the whole picture");
+  c.run(3000, () => [bike]);
+  ok(!c._active, `nothing moving left: standing by again after the linger, parked bike or not (${((c.T - leftAt) / 1000).toFixed(1)} s after the car)`);
+  c.run(2000, () => [bike]); ok(!c._active, "and the bike doesn't wake it again");
+  c.disconnectedCallback();
+
+  // two cars at once: stays on the first; when it leaves, goes over to the other, once
+  c = await mkc({ types: ["vehicle"] });
+  c.run(2000, (t) => [bike, car("a", 100 + t * 0.1), car("b", 800 - t * 0.05)]);
+  ok(c._active.subject === "a" && ids(c) === "a,b(also)", "two cars: the one that woke it is the subject, the other is boxed lightly");
+  const seenSubjects = new Set(); const watch = (ms, f) => { for (let end = c.T + ms; c.T < end; ) { c.run(100, f); if (c._active) seenSubjects.add(c._active.subject); } };
+  watch(2000, (t) => [bike, car("a", 100 + t * 0.1), car("b", 800 - t * 0.05)]);
+  ok(seenSubjects.size === 1 && seenSubjects.has("a"), "while both are there it never goes from one to the other");
+  watch(3000, (t) => [bike, car("b", 800 - t * 0.05)]);
+  ok(c._active.subject === "b" && [...seenSubjects].join() === "a,b", "the first has left: over to the other, once");
+  [cx] = c.centre(); ok(Math.abs(cx - (800 - (c.T - 300) * 0.05 + 50)) < 40, `and the view is on it (centre ${cx})`);
+  c.disconnectedCallback();
+
+  // three: the nearest to where the subject was is taken
+  c = await mkc({ types: ["vehicle"] });
+  c.run(2000, () => [car("a", 400, { coord: [400, 150, 100, 60] }), car("near", 520), car("far", 50)]);
+  c._active.subject === "a" || ok(false, "(set-up: a is the subject)");
+  c.run(2500, (t) => [car("near", 520 + (t % 200 ? 1 : 0)), car("far", 50 + (t % 200 ? 1 : 0))]);
+  ok(c._active.subject === "near", "several to choose from: the one nearest to where the subject was");
+  c.disconnectedCallback();
+
+  // the subject's reports go on under another id (Protect's box, then the local model's)
+  c = await mkc({ types: ["person"] });
+  const walker = (id, t, extra = {}) => ({ id, coord: [200 + t * 0.05, 300, 60, 180], objectType: "person", stationary: false, ...extra });
+  c.run(2000, (t) => [bike, walker("u7", t)], { source: "protect" });
+  const before = c.centre();
+  c.run(500, (t) => [bike, walker("m7", t, { local: true })], { source: "local" });
+  c.run(600, (t) => [bike, walker("m7", t, { local: true })], { source: "local" });
+  const after = c.centre();
+  ok(c._active.subject === "m7" && Math.abs(after[0] - before[0]) < 90 && after[1] > 1.5, `its reports go on under another id, where it was: taken up at once, the view not let go (centre ${before[0]} -> ${after[0]}, zoom ${after[1]})`);
+  // mixed packets, same id from both makes, a parked thing throughout
+  for (let n = 0; n < 40; n++) { c.T += 33; c.send([walker("m7", c.T, { local: true })], { source: "local" }); if (n % 8 === 0) c.send([bike, { ...walker("m7", c.T - 400), coord: [204 + (c.T - 400) * 0.05, 302, 64, 184] }], { source: "protect" }); c.frame(); }
+  ok(c._active.subject === "m7" && ids(c) === "m7", "local and Protect packets mixed, the bike in every one of Protect's: still on the one person");
+  // the person stands still: stays the subject, the card stays up
+  const stoodAt = 200 + c.T * 0.05;
+  c.run(8000, () => [bike, { id: "m7", coord: [stoodAt, 300, 60, 180], objectType: "person", stationary: true, local: true }], { source: "local" });
+  ok(!!c._active && c._active.subject === "m7" && ids(c) === "m7" && c.centre()[1] > 1.5, "the person stands still for 8 s: still the subject, still zoomed in (a person standing is not a parked thing)");
+  c.run(7000, () => [bike]); ok(!c._active, "they have gone: standing by after the linger");
+  c.disconnectedCallback();
+
+  // a car that parks in view is let go
+  c = await mkc({ types: ["vehicle"] });
+  c.run(2000, (t) => [car("p", 100 + t * 0.1)]);
+  c.run(30000, () => [car("p", 300, { stationary: true })]);
+  ok(!c._active, "a car that parks in view: let go after it has stood still a while, and the card stands by (it used to stay up for good)");
+  c.disconnectedCallback();
+
+  // steady zoom: the box's size wobbling a little between packets doesn't move the zoom
+  c = await mkc({ types: ["person"] });
+  c.run(3000, (t) => [{ id: "w", coord: [400, 300, 60 + ((t / 100) % 2 ? 2 : -2), 180 + ((t / 100) % 2 ? 4 : -4)], objectType: "person", stationary: false }]);
+  const zooms = new Set(); for (let n = 0; n < 30; n++) { c.run(100, (t) => [{ id: "w", coord: [400, 300, 60 + ((t / 100) % 2 ? 2 : -2), 180 + ((t / 100) % 2 ? 4 : -4)], objectType: "person", stationary: false }]); zooms.add(c._active.view.want[0]); }
+  ok(zooms.size === 1, "a box whose size wobbles from packet to packet: the zoom aimed at stays the same");
+  c.disconnectedCallback(); ctx.localStorage.store = {};
 }
 // --- the tracking card's "Last seen", from the integration's record
 {
