@@ -44,6 +44,9 @@
  *   source: auto                            # whose positions: auto (the Protect Tracker
  *                                           # integration's when it is installed, else
  *                                           # Protect's own) | local | protect
+ *   box_style: reticle                      # how the followed thing is marked: reticle
+ *                                           # (the scanner's own brackets close onto it,
+ *                                           # follow it and let it go) | plain (a box)
  *   split: off                              # 2, 3 or 4: with that many things of a watched
  *                                           # kind on the move, a pane for each (at most),
  *                                           # each zoomed in on its own; off: one view, on
@@ -81,6 +84,27 @@
  * parked car it drove past. So where things stand is remembered, and a
  * subject that comes to rest on such a place, or jumps across the picture
  * from one report to the next, counts as lost there and then, not followed.
+ *
+ * One look, from standing by to following and back (`box_style: reticle`).
+ * The scanner's reticle and the box round the followed thing are the same
+ * brackets, in the card's accent colour:
+ *   acquire  on waking, the reticle flies to the thing and takes its shape;
+ *            the sweep and rings fall in towards it; the brackets close on
+ *            it as the picture comes up (with the sound, if one is set)
+ *   track    the brackets follow it, a tag on them saying what it is, how
+ *            sure, and where (zones). Solid edges for a box made on this
+ *            machine, dashed for one of UniFi Protect's; dimmer when it
+ *            stands still; breathing gently on a sure one. A face found on
+ *            it is a small bracket set; other moving things of a watched
+ *            kind are faint brackets in their kind's colour
+ *   lost     the brackets stay where it was and pulse while the card waits
+ *   hand-over  another thing becomes the subject: the brackets move across
+ *   release  standing by again: the reticle opens out from where the
+ *            brackets were, back to its place, as the scanner returns
+ * All of it is CSS on a handful of elements (nothing drawn per frame beyond
+ * placing the boxes, and nothing at all while standing by out of sight). For
+ * those who ask for less motion there are no flights: things are where they
+ * belong at once.
  *
  * Split view (`split: 2` to `4`). When a second thing of a watched kind has
  * been moving for a second, the picture splits into panes, one for each
@@ -129,6 +153,10 @@ const BAN_MS = 5000; // an id the subject was lost on isn't taken up again for t
 const SPLIT_IN_MS = 1000; // a second thing must be moving this long before the view splits
 const SPLIT_OUT_MS = 1500; // and only one left this long before it is one view again
 const SPLIT_MIN = [260, 150]; // a card smaller than this (px) stays one view
+const BOX_STYLES = ["reticle", "plain"];
+const HOP_MS = 300; // the brackets moving over to another subject
+const CLOSE_MS = 380; // the brackets closing onto a subject just acquired
+const RELEASE_MS = 450; // the reticle opening back out to its place
 const FAIL_MS = 12000; // no picture this long after starting: say so
 const LAST_KEY = "protect-tracking-card:last:";
 
@@ -303,6 +331,52 @@ const STYLE = `
   .box.part { border-width: calc(1.5px * var(--k, 1)); border-radius: 50% / 45%; pointer-events: none; }
   .box.other { border-style: dashed; border-width: calc(1px * var(--k, 1)); opacity: .6; pointer-events: none; }
   .box.also { border-width: calc(1px * var(--k, 1)); opacity: .75; }
+  .box .tag { display: none; }
+  /* --- reticle style: the scanner's brackets are the box (--bc: their colour; --k keeps them the same on screen at any zoom) */
+  .bs-reticle .box { border-color: transparent; border-radius: 0; --bc: var(--c, #fff); --bt: calc(2px * var(--k, 1)); --bl: 26%; }
+  .bs-reticle .box.main { --bc: var(--tracking-accent, var(--primary-color, #e0102a)); }
+  .bs-reticle .box::before { content: ""; position: absolute; inset: calc(-3px * var(--k, 1));
+    background:
+      linear-gradient(var(--bc), var(--bc)) top left / var(--bl) var(--bt) no-repeat, linear-gradient(var(--bc), var(--bc)) top left / var(--bt) var(--bl) no-repeat,
+      linear-gradient(var(--bc), var(--bc)) top right / var(--bl) var(--bt) no-repeat, linear-gradient(var(--bc), var(--bc)) top right / var(--bt) var(--bl) no-repeat,
+      linear-gradient(var(--bc), var(--bc)) bottom left / var(--bl) var(--bt) no-repeat, linear-gradient(var(--bc), var(--bc)) bottom left / var(--bt) var(--bl) no-repeat,
+      linear-gradient(var(--bc), var(--bc)) bottom right / var(--bl) var(--bt) no-repeat, linear-gradient(var(--bc), var(--bc)) bottom right / var(--bt) var(--bl) no-repeat;
+    filter: drop-shadow(0 0 calc(3px * var(--k, 1)) color-mix(in srgb, var(--bc) 65%, transparent)); }
+  /* thin edges between the brackets: solid for a box made here, dashed for one of Protect's */
+  .bs-reticle .box::after { content: ""; position: absolute; inset: 0; border: calc(1px * var(--k, 1)) solid color-mix(in srgb, var(--bc) 32%, transparent); }
+  .bs-reticle .box.passed::after { border-style: dashed; }
+  .bs-reticle .box.still::before { opacity: .55; }
+  .bs-reticle .box.main.sure:not(.still):not(.lostb)::before { animation: trk-breathe 2.8s ease-in-out infinite; }
+  .bs-reticle .box.main.acq::before { animation: trk-close .38s cubic-bezier(.2,.9,.25,1.1) 1 both; }
+  .bs-reticle .box.main.hop { transition: left .3s ease, top .3s ease, width .3s ease, height .3s ease; }
+  .bs-reticle .box.main.lostb::before { animation: trk-lost .9s ease-in-out infinite; }
+  .bs-reticle .box.main.lostb::after, .bs-reticle .box.main.lostb .tag { display: none; }
+  .bs-reticle .box.also { opacity: .6; --bt: calc(1.5px * var(--k, 1)); }
+  .bs-reticle .box.other { opacity: .4; --bt: calc(1px * var(--k, 1)); border-style: none; }
+  .bs-reticle .box.other::after { border-style: dotted; }
+  .bs-reticle .box.part { --bc: var(--tracking-accent, var(--primary-color, #e0102a)); --bt: calc(1.5px * var(--k, 1)); --bl: 34%; }
+  .bs-reticle .box.part::before { inset: 0; filter: none; }
+  .bs-reticle .box.part::after { display: none; }
+  /* the tag: what it is, on the brackets, the same size at any zoom; under the box when there is no room above */
+  .bs-reticle .box.main .tag { display: block; position: absolute; left: calc(-3px * var(--k, 1)); bottom: 100%; margin-bottom: calc(7px * var(--k, 1)); white-space: nowrap; pointer-events: none;
+    font-size: calc(11px * var(--k, 1)); line-height: 1.35; font-weight: 600; letter-spacing: .02em; color: #fff; padding: calc(1px * var(--k, 1)) calc(6px * var(--k, 1));
+    background: color-mix(in srgb, var(--bc) 82%, #000); border-radius: calc(2px * var(--k, 1)); text-shadow: none; }
+  .bs-reticle .box.main .tag.below { bottom: auto; top: 100%; margin: calc(7px * var(--k, 1)) 0 0; }
+  .bs-reticle .info { display: none; }
+  @keyframes trk-close { 0% { transform: scale(1.3); opacity: .35; filter: brightness(2); } 100% { transform: scale(1); opacity: 1; } }
+  @keyframes trk-lost { 0%, 100% { opacity: .9; transform: scale(1); } 50% { opacity: .3; transform: scale(1.06); } }
+  /* acquire: the reticle takes the thing's shape as it flies there; the sweep and rings fall in towards it */
+  .bs-reticle.lock .scan .reticle { width: var(--rw, 30%); height: var(--rh, auto); aspect-ratio: auto; max-height: none;
+    transform: translate(-50%, -50%) translate(var(--dx, 0px), var(--dy, 0px)); transition: transform .32s cubic-bezier(.2,.9,.25,1.15), width .32s ease, height .32s ease; }
+  .bs-reticle.lock .scan .reticle::after { opacity: 0; }
+  .bs-reticle.lock .scan .sweep, .bs-reticle.lock .scan .rings { translate: var(--dx, 0px) var(--dy, 0px); scale: .12; opacity: 0; transition: translate .4s ease-in, scale .4s ease-in, opacity .4s ease-in; }
+  /* release: it starts from where the brackets were (put there without a flight), then opens back out */
+  .scan .reticle.put { transition: none; }
+  .bs-reticle .scan .reticle.from { width: var(--rw, 30%); height: var(--rh, auto); aspect-ratio: auto; max-height: none; transform: translate(-50%, -50%) translate(var(--dx, 0px), var(--dy, 0px)); }
+  .bs-reticle .scan .reticle { transition: transform .45s cubic-bezier(.3,.7,.3,1), width .45s ease, height .45s ease; }
+  @media (prefers-reduced-motion: reduce) {
+    .box, .box::before, .scan .reticle, .scan .sweep, .scan .rings { transition: none !important; animation: none !important; }
+  }
   /* standing by: the words, small, along the bottom */
   .idle { position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
     padding: 22px 12px 9px; background: linear-gradient(to top, rgba(0,0,0,.78), rgba(0,0,0,0)); text-shadow: 0 1px 2px #000;
@@ -436,6 +510,21 @@ class ProtectTrackingCard extends HTMLElement {
     if (this._hass) this._discover();
   }
 
+  // How the followed thing is marked: "reticle" (the scanner's brackets) or "plain".
+  _boxStyle() {
+    const v = this._config && this._config.box_style;
+    return BOX_STYLES.includes(v) ? v : "reticle";
+  }
+
+  // (no flights for those who ask for less motion)
+  _calmNow() {
+    try {
+      return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    } catch (e) {
+      return false;
+    }
+  }
+
   // ----------------------------------------------------------- split view
 
   // How many panes at most (0: no split view).
@@ -506,6 +595,13 @@ class ProtectTrackingCard extends HTMLElement {
     const vw = video && video.videoWidth;
     const vh = video && video.videoHeight;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
+    if (a.accent === undefined) {
+      // (the card's accent, for the brackets drawn on the panes)
+      a.accent = (typeof this._config.accent === "string" && this._config.accent) || "";
+      try {
+        if (!a.accent) a.accent = getComputedStyle(root.querySelector(".frame")).getPropertyValue("--primary-color").trim();
+      } catch (e) {}
+    }
     const pw = W / cols;
     const ph = H / rows;
     const f = a.paneAt ? 1 - Math.exp(-Math.min(250, now - a.paneAt) / EASE_MS) : 1;
@@ -547,10 +643,28 @@ class ProtectTrackingCard extends HTMLElement {
       }
       if (!node) continue;
       const [x, y, w, h] = node.box;
-      const color = LIVE_COLORS[node.t.type] || "#e5e7eb";
-      g.lineWidth = 2 * dpr;
+      const color = (this._boxStyle() === "reticle" && a.accent) || LIVE_COLORS[node.t.type] || "#e5e7eb";
+      const [bx, by, bw, bh] = [(((x / 1000) * vw - sx) / sw) * cw, (((y / 1000) * vh - sy) / sh) * ch, (((w / 1000) * vw) / sw) * cw, (((h / 1000) * vh) / sh) * ch];
       g.strokeStyle = color;
-      g.strokeRect((((x / 1000) * vw - sx) / sw) * cw, (((y / 1000) * vh - sy) / sh) * ch, (((w / 1000) * vw) / sw) * cw, (((h / 1000) * vh) / sh) * ch);
+      if (this._boxStyle() === "reticle") {
+        // the same brackets as in one view: thin edges, the corners strong
+        g.globalAlpha = 0.32;
+        g.lineWidth = dpr;
+        g.strokeRect(bx, by, bw, bh);
+        g.globalAlpha = 1;
+        g.lineWidth = 2 * dpr;
+        const [lx, ly] = [bw * 0.26, bh * 0.26];
+        g.beginPath();
+        for (const [cx, cy, dx, dy] of [[bx, by, 1, 1], [bx + bw, by, -1, 1], [bx, by + bh, 1, -1], [bx + bw, by + bh, -1, -1]]) {
+          g.moveTo(cx + dx * lx, cy);
+          g.lineTo(cx, cy);
+          g.lineTo(cx, cy + dy * ly);
+        }
+        g.stroke();
+      } else {
+        g.lineWidth = 2 * dpr;
+        g.strokeRect(bx, by, bw, bh);
+      }
       const label = `${KINDS[node.t.type] ? KINDS[node.t.type][0] : node.t.type}${node.t.desc ? ` · ${node.t.desc}` : ""}`;
       g.font = `600 ${11 * dpr}px sans-serif`;
       g.fillStyle = "rgba(0,0,0,.6)";
@@ -724,6 +838,8 @@ class ProtectTrackingCard extends HTMLElement {
     this._root = root;
     const frame = root.querySelector(".frame");
     frame.classList.add(`s-${STANDBY.includes(this._config.standby) ? this._config.standby : "radar"}`);
+    frame.classList.add(`bs-${this._boxStyle()}`);
+    this._phase = "standby";
     if (typeof this._config.accent === "string" && this._config.accent) frame.style.setProperty("--tracking-accent", this._config.accent);
     frame.addEventListener("click", () => this._open());
     root.querySelector(".snd").addEventListener("click", (ev) => {
@@ -1073,7 +1189,14 @@ class ProtectTrackingCard extends HTMLElement {
       reticle.style.setProperty("--dx", `${(((coord[0] + coord[2] / 2) / 1000 - 0.5) * W).toFixed(1)}px`);
       reticle.style.setProperty("--dy", `${(((coord[1] + coord[3] / 2) / 1000 - 0.5) * H).toFixed(1)}px`);
       reticle.style.setProperty("--ls", Math.max(0.3, Math.min(1.2, (Math.max(coord[2] * W, coord[3] * H) / 1000) * 1.5 / size)).toFixed(3));
+      // (reticle style: it takes the thing's own shape)
+      reticle.style.setProperty("--rw", `${Math.max(14, (coord[2] / 1000) * W + 6).toFixed(1)}px`);
+      reticle.style.setProperty("--rh", `${Math.max(14, (coord[3] / 1000) * H + 6).toFixed(1)}px`);
     }
+    reticle.classList.remove("from", "put");
+    clearTimeout(this._releaseTimer);
+    a.calm = this._calmNow();
+    this._phase = a.calm ? "track" : "acquire";
     root.querySelector(".blips").replaceChildren();
     frame.classList.add("active", "lock");
     this._chime();
@@ -1112,8 +1235,29 @@ class ProtectTrackingCard extends HTMLElement {
     clearTimeout(this._lockTimer);
     root.querySelector(".frame").classList.remove("active", "lock", "playing");
     this._splitEnd(null);
-    // (the reticle drifts back to the middle as the scanner fades in again)
-    for (const v of ["--dx", "--dy", "--ls"]) root.querySelector(".reticle").style.removeProperty(v);
+    // Release: the reticle starts where the brackets were (the picture is
+    // whole again by now) and opens back out to its place as the scanner
+    // fades in. For those who ask for less motion it is simply back.
+    const reticle = root.querySelector(".reticle");
+    const frame = root.querySelector(".frame");
+    const last = a.subjectBox;
+    const fly = !a.calm && this._boxStyle() === "reticle" && Array.isArray(last);
+    if (fly) {
+      const W = frame.clientWidth || 0;
+      const H = frame.clientHeight || 0;
+      reticle.classList.add("put", "from");
+      reticle.style.setProperty("--dx", `${(((last[0] + last[2] / 2) / 1000 - 0.5) * W).toFixed(1)}px`);
+      reticle.style.setProperty("--dy", `${(((last[1] + last[3] / 2) / 1000 - 0.5) * H).toFixed(1)}px`);
+      reticle.style.setProperty("--rw", `${Math.max(14, (last[2] / 1000) * W + 6).toFixed(1)}px`);
+      reticle.style.setProperty("--rh", `${Math.max(14, (last[3] / 1000) * H + 6).toFixed(1)}px`);
+      void reticle.offsetWidth; // (it is there now; from here it flies)
+      reticle.classList.remove("put");
+    }
+    reticle.classList.remove("from");
+    for (const v of ["--dx", "--dy", "--ls", "--rw", "--rh"]) reticle.style.removeProperty(v);
+    this._phase = fly ? "release" : "standby";
+    clearTimeout(this._releaseTimer);
+    if (fly) this._releaseTimer = setTimeout(() => !this._active && (this._phase = "standby"), RELEASE_MS);
     root.querySelector(".zoomer").style.transform = "";
     root.querySelector(".boxes").replaceChildren();
     root.querySelector(".info").replaceChildren();
@@ -1185,6 +1329,14 @@ class ProtectTrackingCard extends HTMLElement {
         a.subject = null;
         subject = null;
         a.view.want = null; // (no staying a moment on where it was: that is the wrong thing)
+        // (nor do the brackets stay there, pulsing on a parked car)
+        if (a.mainEl) {
+          a.els.delete(a.mainId);
+          a.mainEl.remove();
+          a.mainEl = null;
+          a.mainId = undefined;
+          a.dropped = true;
+        }
       }
     }
     if (!subject) {
@@ -1264,10 +1416,52 @@ class ProtectTrackingCard extends HTMLElement {
     const layer = root.querySelector(".boxes");
     layer.style.cssText = `left:${place[0].toFixed(1)}px;top:${place[1].toFixed(1)}px;width:${place[2].toFixed(1)}px;height:${place[3].toFixed(1)}px;--k:${(1 / (a.view.s || 1)).toFixed(4)}`;
     const keep = new Set();
+    // The subject has one element of its own, whichever thing it is: when
+    // another becomes the subject the brackets move across (a hand-over),
+    // and while there is none they stay where it was (lost).
+    if (subject && a.mainId !== subject.t.id) {
+      const old = a.els.get(subject.t.id);
+      if (old && old !== a.mainEl) old.remove();
+      if (a.mainId !== undefined) a.els.delete(a.mainId);
+      if (!a.mainEl) {
+        a.mainEl = document.createElement("div");
+        const tag = document.createElement("span");
+        tag.className = "tag";
+        a.mainEl.appendChild(tag);
+        layer.appendChild(a.mainEl);
+      }
+      if (!a.calm) {
+        if (a.mainId !== undefined) a.hopUntil = now + HOP_MS;
+        else a.acqUntil = now + CLOSE_MS;
+      }
+      a.mainId = subject.t.id;
+      a.els.set(a.mainId, a.mainEl);
+    }
+    if (!subject && a.mainEl) {
+      keep.add(a.mainId);
+      a.mainEl.className = "box main lostb";
+    }
+    this._phase = subject ? (!a.calm && now - a.since < LOCK_MS ? "acquire" : "track") : a.mainEl || a.dropped ? "lost" : this._phase;
     for (const n of [...shown, ...others, ...parts]) {
       const { t, box } = n;
       keep.add(t.id);
       let el = a.els.get(t.id);
+      if (n === subject) {
+        const sure = Number(t.confidence) >= 80;
+        const still = at - t.moved > MOVING_MS;
+        const passed = a.sub.using === "tracker" && !t.local;
+        el.className = `box main${sure ? " sure" : ""}${still ? " still" : ""}${passed ? " passed" : ""}${now < (a.hopUntil || 0) ? " hop" : ""}${now < (a.acqUntil || 0) ? " acq" : ""}`;
+        el.style.cssText = `left:${(box[0] / 10).toFixed(2)}%;top:${(box[1] / 10).toFixed(2)}%;width:${(box[2] / 10).toFixed(2)}%;height:${(box[3] / 10).toFixed(2)}%;--c:${LIVE_COLORS[t.type] || "#e5e7eb"}`;
+        // its tag: what it is, how sure, where
+        const names = (this._zones && this._zones[a.sub.cam.id]) || {};
+        const where = [...new Set([...(t.zones || []).map((id) => names[`zone:${id}`]), ...(t.loiterZones || []).map((id) => names[`loiter:${id}`]), ...(t.lines || []).map((id) => names[`line:${id}`])].filter(Boolean))].join(", ");
+        const text = `${KINDS[t.type] ? KINDS[t.type][0] : t.type}${t.desc ? ` · ${t.desc}` : ""}${Number.isFinite(t.confidence) ? ` ${Math.round(t.confidence)}%` : ""}${where ? ` · ${where}` : ""}`;
+        const tag = el.firstChild;
+        if (tag.textContent !== text) tag.textContent = text;
+        tag.className = box[1] < 70 ? "tag below" : "tag";
+        continue;
+      }
+      if (el === a.mainEl) el = null; // (it was the subject; it gets a box of its own like the others now)
       if (!el) {
         el = document.createElement("div");
         el.onclick = (ev) => {
@@ -1287,7 +1481,7 @@ class ProtectTrackingCard extends HTMLElement {
     }
     for (const [id, el] of a.els) {
       if (keep.has(id)) continue;
-      el.remove();
+      if (el !== a.mainEl) el.remove();
       a.els.delete(id);
     }
 
@@ -1385,7 +1579,7 @@ class ProtectTrackingCard extends HTMLElement {
 // a sound on every click on it, the one already picked included.
 
 // What the card does where the config says nothing (as setConfig has it).
-const EDIT_DEFAULTS = { types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, split: "off", sound: "none", sound_volume: 0.5 };
+const EDIT_DEFAULTS = { box_style: "reticle", types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, split: "off", sound: "none", sound_volume: 0.5 };
 const EDIT_FORM = [
   { name: "camera", selector: { entity: { domain: "camera", integration: "unifiprotect" } } },
   { name: "name", selector: { text: {} } },
@@ -1394,12 +1588,13 @@ const EDIT_FORM = [
   { name: "linger", selector: { number: { min: 1, max: 120, mode: "box", unit_of_measurement: "s" } } },
   { name: "show_others", selector: { boolean: {} } },
   { name: "warm", selector: { boolean: {} } },
+  { name: "box_style", selector: { select: { options: [{ value: "reticle", label: "Reticle: the scanner's brackets close onto it" }, { value: "plain", label: "Plain box" }] } } },
   { name: "split", selector: { select: { options: [{ value: "off", label: "One view, on the subject" }, { value: "2", label: "Up to 2 panes" }, { value: "3", label: "Up to 3 panes" }, { value: "4", label: "Up to 4 panes" }] } } },
   { name: "height", selector: { text: {} } },
 ];
 const EDIT_LABELS = { camera: "Camera (empty: every camera that recognises things)", name: "Name (empty: the camera's)", types: "Watch for", standby: "Standing-by look",
   linger: "Stay after last seen", show_others: "Also box other things", warm: "Live picture while standing by (keeps the stream running)", height: "Height, e.g. 300px (empty: by shape)",
-  split: "Several things moving at once" };
+  split: "Several things moving at once", box_style: "How the followed thing is marked" };
 const EDIT_STYLE = `
   :host { display: block; }
   .sound { margin-top: 20px; }

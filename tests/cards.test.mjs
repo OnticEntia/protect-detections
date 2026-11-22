@@ -973,16 +973,16 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const mid = [(400 - z[1]) / z[3], (225 - z[2]) / z[3]];
   console.log("   view:", root.querySelector(".zoomer").style.transform, "middle", mid.map(Math.round).join());
   ok(+z[3] > 2 && Math.abs(mid[0] - (0.584 + 0.03) * 800) < 12 && Math.abs(mid[1] - (0.3 + 0.08) * 450) < 12, "zoomed in on the person, who sits in the middle");
-  ok(a.els.size === 1 && a.els.has("p1") && a.els.get("p1").className === "box", "only the person is boxed");
+  ok(a.els.size === 1 && a.els.has("p1") && a.els.get("p1").className.startsWith("box main"), "only the person is boxed");
   ok(root.querySelector(".info").children.map((x) => x.textAll).join("|") === "Person 91% · Porch, Lawn", "kind, how sure, and the zones by name (from Protect Zones)");
   // two people: it stays on the one that woke it; a tap on the other goes over to that one
   send(1500, [tr("p1", "person", 580), tr("p2", "person", 200)]); send(1750, [tr("p1", "person", 600), tr("p2", "person", 210)]);
   frameAt(T0 + 2700, 60);
   const z2 = /scale\(([\d.]+)\)/.exec(root.querySelector(".zoomer").style.transform) || [0, 1];
-  ok(a.els.size === 2 && Math.abs(+z2[1] - +z[3]) < 0.35 && a.subject === "p1" && a.els.get("p1").className === "box" && a.els.get("p2").className === "box also", "a second person: boxed too (lightly), but the view stays on the first and doesn't widen");
+  ok(a.els.size === 2 && Math.abs(+z2[1] - +z[3]) < 0.35 && a.subject === "p1" && a.els.get("p1").className.startsWith("box main") && a.els.get("p2").className === "box also", "a second person: boxed too (lightly), but the view stays on the first and doesn't widen");
   a.els.get("p2").onclick({ stopPropagation() {} }); frameAt(T0 + 2700, 60);
   const z3 = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(root.querySelector(".zoomer").style.transform);
-  ok(a.subject === "p2" && Math.abs((400 - z3[1]) / z3[3] - (0.21 + 0.03) * 800) < 15 && a.els.get("p2").className === "box" && a.els.get("p1").className === "box also" && more.length === 0, "tapping the other box: the view goes over to that one (and the camera isn't opened)");
+  ok(a.subject === "p2" && Math.abs((400 - z3[1]) / z3[3] - (0.21 + 0.03) * 800) < 15 && a.els.get("p2").className.startsWith("box main") && a.els.get("p1").className === "box also" && more.length === 0, "tapping the other box: the view goes over to that one (and the camera isn't opened)");
   a.els.get("p1").onclick({ stopPropagation() {} }); ok(a.subject === "p1", "and back with a tap on the first");
   // tap on the card: the camera's own dialog
   frame.dispatchEvent(new Ev("click")); ok(more.join() === "camera.p_high_resolution_channel", "tapping the card opens the camera");
@@ -1005,7 +1005,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
   Date.now = () => U0 + 750; p2({ clockWall: U0 + 250, tracks: [tr("p9", "person", 510), tr("v9", "vehicle", 100)] }); Date.now = real;
   const a2 = c._active; ok(!!a2 && a2.stream === c._warm.stream, "a vehicle does, and the picture is the one already running");
   Date.now = () => U0 + 900; c._frame(a2); Date.now = real;
-  ok(a2.els.get("v9").className === "box" && a2.els.get("p9").className === "box other", "show_others: the rest are boxed faintly");
+  ok(a2.els.get("v9").className.startsWith("box main") && a2.els.get("p9").className === "box other", "show_others: the rest are boxed faintly");
   c.disconnectedCallback(); ok(subs.size === 0 && !c._warm, "and all of it stops with the card");
   c = await mk({ camera: "camera.q_high_resolution_channel" }, live); ok(c._state === "nocams" && txt(c, "span") === "This camera doesn't recognise things", "a pinned camera that doesn't recognise things: says so"); c.disconnectedCallback();
   ok(typeof new Trk().getCardSize() === "number" && new Trk().getGridOptions().columns > 0 && ctx.window.customCards.some((x) => x.type === "protect-tracking-card"), "a normal dashboard card (size, grid, listed in the card picker)");
@@ -1033,7 +1033,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
     return c; };
   const bike = { id: "bike", coord: [500, 600, 220, 300], objectType: "vehicle", stationary: true, desc: "bike" };
   const car = (id, x, extra = {}) => ({ id, coord: [x, 150, 100, 60], objectType: "vehicle", stationary: false, ...extra });
-  const ids = (c) => [...c._active.els].map(([id, el]) => id + (el.className === "box" ? "" : "(" + el.className.replace("box ", "") + ")")).sort().join();
+  const ids = (c) => [...c._active.els].map(([id, el]) => id + (el.className.startsWith("box main") ? (el.className.includes("lostb") ? "(lost)" : "") : "(" + el.className.replace("box ", "") + ")")).sort().join();
 
   // watching vehicles, with a bike parked in view the whole time
   let c = await mkc({ types: ["vehicle"] });
@@ -1046,7 +1046,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(k > 1.5 && Math.abs(cx - (100 + (c.T - 3000 - 300) * 0.2 + 50)) < 40 && ids(c) === "c1", `the view is on the car alone, and the bike is neither framed nor boxed (centre ${cx}, zoom ${k})`);
   // the car leaves; the bike is still there
   const leftAt = c.T; c.run(1200, () => [bike]);
-  ok(!!c._active && c._active.subject === "c1" && ids(c) === "", "the car has gone: nothing is boxed, and the bike doesn't become the subject");
+  ok(!!c._active && c._active.subject === "c1" && ids(c) === "c1(lost)", "the car has gone: only its brackets, left where it was last (the bike is not boxed and doesn't become the subject)");
   [cx, k] = c.centre(); ok(cx > 660, `the view stays a moment where the car was last, and doesn't go to the bike at 610 (centre ${cx})`);
   c.run(2500, () => [bike]); ok(c.centre()[1] < 1.2, "then it eases back out to the whole picture");
   c.run(3000, () => [bike]);
@@ -1151,6 +1151,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const xa = (100 + (c.T - 300) * 0.1 + 50) * 1.6, xb = (800 - (c.T - 300) * 0.05 + 50) * 1.6;
   ok(Math.abs(mid(pa) - xa) < 60 && Math.abs(mid(pb) - xb) < 60 && lastDraw(pa)[4] < 1600 / 2, `each pane is on its own car, zoomed in (middles ${mid(pa)} and ${mid(pb)} of 1600; cars at ${Math.round(xa)} and ${Math.round(xb)})`);
   ok(pa._g.calls.some((x) => x[0] === "strokeRect") && pa._g.calls.some((x) => x[0] === "fillText" && /Vehicle/.test(x[1])), "with its box and what it is");
+  ok(pa._g.calls.filter((x) => x[0] === "lineTo").length >= 8 && pa._g.calls.some((x) => x[0] === "stroke"), "in the panes too the box is the brackets (corners drawn strong)");
   ok(!c._root.querySelector(".zoomer").style.transform, "the picture underneath is left whole");
   // the same two, said in the other order, for a while: no swapping
   const orders = new Set(); for (let n = 0; n < 20; n++) { c.run(100, (t) => [...two(t)].reverse()); orders.add([...host.children].map((x) => (x === pa ? "A" : x === pb ? "B" : "?")).join("")); }
@@ -1203,6 +1204,66 @@ ok(w._built && !w._building, "next good config builds after a failure");
   let gone = 0; for (let n = 0; n < 200 && c._active; n++) { c.run(100, () => [car("p", 300)]); gone = c.T - stopAt; }
   ok(!c._active && gone > 4000 && gone < 13000, `a car that stops in view, still reported as moving: let go after the linger and then standing by (${(gone / 1000).toFixed(1)} s after it stopped; linger 5 s)`);
   c.disconnectedCallback();
+
+  // --- one look: standing by -> acquire -> track -> lost -> release -> standing by
+  {
+    const walker2 = (id, t, extra = {}) => ({ id, coord: [200 + t * 0.05, 300, 60, 180], objectType: "person", stationary: false, confidence: 91, zones: [], ...extra });
+    c = await mkc({ types: ["person"], linger: 3 }); const fr2 = c._root.querySelector(".frame"); const ret = c._root.querySelector(".reticle");
+    ok(fr2.classList.contains("bs-reticle") && c._phase === "standby", "reticle style is the default; standing by");
+    c.T += 100; c.send([walker2("w", c.T)]);
+    ok(c._phase === "acquire" && fr2.classList.contains("lock") && /px$/.test(ret.style._v["--rw"]) && /px$/.test(ret.style._v["--rh"]) && ret.style._v["--dx"] !== undefined, "someone appears: acquire, the reticle sent to them with their shape");
+    ok(Math.abs(parseFloat(ret.style._v["--rw"]) - (60 / 1000 * 1000 + 6)) < 1 && Math.abs(parseFloat(ret.style._v["--rh"]) - (180 / 1000 * 562 + 6)) < 1, "(the shape is the box's own, in the card's pixels)");
+    c.run(400, (t) => [walker2("w", t)]);
+    const main = c._active.mainEl;
+    ok(c._phase === "acquire" && !!main && main.className.includes("acq") && c._active.els.get("w") === main, "their brackets appear closing onto them, while the lock is still on");
+    c.run(1000, (t) => [walker2("w", t)]);
+    ok(c._phase === "track" && /^box main sure$/.test(main.className), "then track: the brackets follow, steady and sure (91 %)");
+    ok(/^Person 91%$/.test(main.firstChild.textContent) && main.firstChild.className === "tag", "with a tag saying what it is and how sure: " + main.firstChild.textContent);
+    c.run(300, (t) => [walker2("w", t, { confidence: 55, desc: "red" })]);
+    ok(!main.className.includes("sure") && main.firstChild.textContent === "Person · red 55%", "less sure, with a description: no breathing, and the tag says so");
+    { const top = await mkc({ types: ["person"] }); top.run(1500, (t) => [{ id: "h", coord: [200 + t * 0.05, 30, 60, 180], objectType: "person", stationary: false }]);
+      ok(top._active.mainEl.firstChild.className === "tag below" && top._active.mainEl.firstChild.textContent === "Person", "someone at the top edge of the picture: the tag goes under the box (and with no confidence given, none is claimed)"); top.disconnectedCallback(); }
+    const yBack = (t) => [walker2("w", t)];
+    c.run(300, yBack);
+    // the subject stands still: dimmer brackets
+    const stand = 200 + c.T * 0.05; c.run(3000, () => [{ id: "w", coord: [stand, 300, 60, 180], objectType: "person", stationary: true, confidence: 91 }]);
+    ok(main.className.includes("still") && c._phase === "track", "standing still: still tracked, the brackets marked as still");
+    // hand-over: another becomes the subject, the same brackets move across
+    c.run(300, (t) => [walker2("w", t), { id: "x", coord: [700, 300, 60, 180], objectType: "person", stationary: false, confidence: 85 }]);
+    c.run(600, (t) => [{ id: "x", coord: [700 + (t % 200 ? 2 : 0), 300, 60, 180], objectType: "person", stationary: false, confidence: 85 }]);
+    c.run(1500, (t) => [{ id: "x", coord: [700 - (t - c.T) * 0.02 + (t % 200 ? 12 : 0), 300, 60, 180], objectType: "person", stationary: false, confidence: 85 }]);
+    ok(c._active.subject === "x" && c._active.mainEl === main && c._active.els.get("x") === main && !c._active.els.has("w"), "the subject goes and another takes over: the same brackets, now on the other (a move, not a new box)");
+    // lost: the brackets stay and pulse
+    c.run(1200, () => null);
+    ok(c._phase === "lost" && main.className === "box main lostb" && !!c._active, "nobody there: lost, the brackets held where they were, pulsing");
+    // release
+    const before = { ...ret.style._v };
+    c.run(4000, () => null);
+    ok(!c._active && c._phase === "release" && ret.style._v["--dx"] === undefined && ret.style._v["--rw"] === undefined && !ret.classList.contains("from") && !ret.classList.contains("put"), "after the linger: release, the reticle let go to fly back to its place");
+    await new Promise((r) => setTimeout(r, 30)); ok(c._phase === "standby", "and then standing by again");
+    c.disconnectedCallback();
+    // the hop itself, caught in the act
+    c = await mkc({ types: ["person"] }); c.run(1500, (t) => [walker2("a", t), { id: "b", coord: [700 + (t % 200 ? 12 : 0), 300, 60, 180], objectType: "person", stationary: false }]);
+    const m2 = c._active.mainEl; c._active.els.get("b").onclick({ stopPropagation() {} }); c.frame();
+    ok(c._active.mainEl === m2 && m2.className.includes("hop") && c._active.els.get("b") === m2 && c._active.els.get("a") !== m2, "a tap on another: the brackets hop across (marked so for a moment), and the first gets a light box of its own");
+    c.run(500, (t) => [walker2("a", t), { id: "b", coord: [700 + (t % 200 ? 12 : 0), 300, 60, 180], objectType: "person", stationary: false }]); ok(!m2.className.includes("hop"), "the hop is over a moment later");
+    c.disconnectedCallback();
+    // a box of Protect's own, passed on by Protect Tracker: dashed edges
+    c = await mkc({ types: ["person"] }); c.run(1500, (t) => [walker2("u", t)]); c._active.sub.using = "tracker"; c.frame(); ok(c._active.mainEl.className.includes("passed"), "Protect's own box while Protect Tracker is in use: marked as passed on"); c._active.sub.lt.tracks.get("u").local = true; c.frame(); ok(!c._active.mainEl.className.includes("passed"), "one made on this machine: not"); c.disconnectedCallback();
+    // less motion asked for: no flights
+    win.matchMedia = () => ({ matches: true });
+    c = await mkc({ types: ["person"], linger: 3 }); c.T += 100; c.send([walker2("w", c.T)]);
+    ok(c._phase === "track", "less motion asked for: straight to track, no acquire flight");
+    c.run(1200, (t) => [walker2("w", t)]); ok(!/acq|hop/.test(c._active.mainEl.className), "no closing-in on the brackets either");
+    c.run(5000, () => null); ok(!c._active && c._phase === "standby", "and straight back to standing by, no release flight");
+    c.disconnectedCallback(); delete win.matchMedia;
+    // plain style: as it was
+    c = await mkc({ types: ["person"], box_style: "plain" }); ok(c._root.querySelector(".frame").classList.contains("bs-plain") && !c._root.querySelector(".frame").classList.contains("bs-reticle"), "box_style: plain keeps the plain boxes");
+    c.run(1500, (t) => [walker2("w", t)]); ok(c._root.querySelector(".info").children.length === 1, "(with what it is in the chips below, as before)"); c.disconnectedCallback();
+    c = await mkc({ box_style: "sparkly" }); ok(c._root.querySelector(".frame").classList.contains("bs-reticle"), "an unknown style counts as reticle"); c.disconnectedCallback();
+    const css = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8");
+    ok(/prefers-reduced-motion: reduce\) \{\s*\.box, \.box::before, \.scan \.reticle/.test(css) && css.includes(".bs-reticle .info { display: none; }") && css.includes(".box .tag { display: none; }"), "(the style sheet: no flights or pulsing for less motion; the tag only in reticle style, the chips only in plain)");
+  }
 
   // steady zoom: the box's size wobbling a little between packets doesn't move the zoom
   c = await mkc({ types: ["person"] });
@@ -1676,7 +1737,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(!!c._active && plays === 1 && writes === 1, "sixty reports of one person in two seconds' worth: woken once, sounded once, remembered once (not sixty times)");
   ctx.localStorage.setItem = realSet;
   { const a = c._active; const real3 = Date.now; const now3 = real3(); Date.now = () => now3 + 300; a.placeAt = 0; a.view.at = 0; try { c._frame(a); } finally { Date.now = real3; }
-    ok(a.els.size === 2 && a.els.get("p").className === "box" && a.els.get("p:face").className === "box part", "the face is boxed with its person");
+    ok(a.els.size === 2 && a.els.get("p").className.startsWith("box main") && a.els.get("p:face").className === "box part", "the face is boxed with its person");
     ok(c._root.querySelector(".info").children.length === 1 && /^Person/.test(c._root.querySelector(".info").children[0].textAll), "and is not counted or named as a thing of its own"); }
   c.disconnectedCallback();
   c = await mkc({ types: ["face"] }, [TR, PR]); c.conn.open.get(TR)({ clockWall: Date.now() - 20, source: "local", tracks: [{ id: "f7", coord: [400, 400, 30, 40], objectType: "face" }] });
