@@ -827,21 +827,27 @@ ok(w._built && !w._building, "next good config builds after a failure");
   // live_debug: the timing checked against the picture itself
   {
     const x = new ctx.LiveTracks(); const C0 = 1_700_000_000_000; const FW = 160, FH = 90, TRUE = 150;
-    const where = (c) => [100 + 0.3 * (c - C0), 400, 40, 120]; // a thing crossing the picture, 300 units a second
-    for (let c = C0; c <= C0 + 3000; c += 250) x.message({ clockWall: c, clockStream: c - 5, clockStreamRate: 1000, tracks: [{ id: "m", coord: where(c), objectType: "vehicle" }, { id: "p", coord: [800, 100, 80, 80], objectType: "vehicle", stationary: true }] });
+    const where = (c) => [50 + 0.1 * (c - C0), 400, 40, 120]; // a thing crossing the picture, 100 units a second
+    for (let c = C0; c <= C0 + 9000; c += 250) x.message({ clockWall: c, clockStream: c - 5, clockStreamRate: 1000, tracks: [{ id: "m", coord: where(c), objectType: "vehicle" }, { id: "p", coord: [800, 100, 80, 80], objectType: "vehicle", stationary: true }] });
     ok(x.fitResult() === null, "picture check: nothing to say before any frame");
     // each frame shows the thing where the positions stamped TRUE ms before the frame's timestamp have it
-    for (let w = C0 + 600; w <= C0 + 3000; w += 33) {
+    for (let w = C0 + 600; w <= C0 + 8500; w += 33) {
       const b = where(w - TRUE); const mask = new Uint8Array(FW * FH);
       for (let y = Math.floor(b[1] / 1000 * FH); y < Math.ceil((b[1] + b[3]) / 1000 * FH); y++) for (let px = Math.floor(b[0] / 1000 * FW); px < Math.ceil((b[0] + b[2]) / 1000 * FW); px++) mask[y * FW + px] = 1;
       x.fitFrame(w, mask);
     }
     const r = x.fitResult();
     console.log("   picture check:", JSON.stringify(r));
-    ok(!!r && r.n > 10 && Math.abs(r.best - TRUE) <= 25 && r.from <= TRUE && r.to >= TRUE && r.to - r.from <= 150, "picture check: it finds how far the positions' stamps are behind the frames' (here 150 ms), from the picture alone");
-    x.debug = true; x.sync = "rtp"; ok(/picture check: fits at 1[2-7][05] ms/.test(x.describe(0)), "and says so in the debug line");
-    const still = new ctx.LiveTracks(); for (let c = C0; c <= C0 + 3000; c += 250) still.message({ clockWall: c, tracks: [{ id: "p", coord: [800, 100, 80, 80], objectType: "vehicle", stationary: true }] });
-    for (let w = C0 + 600; w <= C0 + 3000; w += 33) still.fitFrame(w, new Uint8Array(FW * FH)); ok(still.fitResult() === null, "things standing still tell nothing, and are left out");
+    ok(!!r && r.n > 10 && Math.abs(r.best - TRUE) <= 25 && r.from <= TRUE && r.to >= TRUE && r.to - r.from <= 150 && r.top > 0.9 && r.used < r.top, "picture check: it finds how far the positions' stamps are behind the frames' (here 150 ms), from the picture alone");
+    x.debug = true; x.sync = "rtp"; ok(/picture check: fits at 1[2-7][05] ms/.test(x.describe(0)), "and says so in the debug line: " + x.describe(0));
+    // the same with the positions stamped after the frames (the other way round)
+    { const y = new ctx.LiveTracks(); for (let c = C0; c <= C0 + 9000; c += 250) y.message({ clockWall: c, tracks: [{ id: "m", coord: where(c), objectType: "vehicle" }] });
+      for (let w = C0 + 600; w <= C0 + 8500; w += 33) { const bb = where(w + 500); const mask = new Uint8Array(FW * FH);
+        for (let yy = Math.floor(bb[1] / 1000 * FH); yy < Math.ceil((bb[1] + bb[3]) / 1000 * FH); yy++) for (let px = Math.floor(bb[0] / 1000 * FW); px < Math.ceil((bb[0] + bb[2]) / 1000 * FW); px++) mask[yy * FW + px] = 1;
+        y.fitFrame(w, mask); }
+      const r2 = y.fitResult(); ok(!!r2 && Math.abs(r2.best + 500) <= 25, "stamps half a second after the frames' are found as well: " + (r2 && r2.best)); }
+    const still = new ctx.LiveTracks(); for (let c = C0; c <= C0 + 9000; c += 250) still.message({ clockWall: c, tracks: [{ id: "p", coord: [800, 100, 80, 80], objectType: "vehicle", stationary: true }] });
+    for (let w = C0 + 600; w <= C0 + 8500; w += 33) still.fitFrame(w, new Uint8Array(FW * FH)); ok(still.fitResult() === null, "things standing still tell nothing, and are left out");
   }
   // HLS: the boxes wait for the picture
   const hl = new ctx.LiveTracks(); w._liveIndex = 0;
