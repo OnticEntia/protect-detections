@@ -72,8 +72,15 @@
  * gone and something else of a watched kind is moving, the view goes over
  * to the nearest such thing, once; a tap on another box makes that one the
  * subject. With nothing moving left it stands by again after `linger`,
- * whatever is parked in view. A subject that is not a person and has stood
- * still for 20 s counts as parked and is let go.
+ * whatever is parked in view. A subject that is not a person and hasn't
+ * moved for `linger` seconds has parked, and is let go.
+ *
+ * Whether a thing moves is judged from its box (protect-live.js), not from
+ * what its reports say alone. And a subject is followed by its id only as
+ * far as that makes sense: a tracker can hand a passing car's id to a
+ * parked car it drove past. So where things stand is remembered, and a
+ * subject that comes to rest on such a place, or jumps across the picture
+ * from one report to the next, counts as lost there and then, not followed.
  *
  * Split view (`split: 2` to `4`). When a second thing of a watched kind has
  * been moving for a second, the picture splits into panes, one for each
@@ -114,7 +121,10 @@ const EASE_MS = 350;
 const MOVING_MS = 2000; // a thing counts as on the move while a report said so this recently
 const SWITCH_MS = 900; // the subject gone this long: another moving thing may be taken instead
 const HANDOVER_MS = 1500; // the subject's reports going on under another id: taken up within this, where it was
-const PARKED_MS = 20000; // a subject that isn't a person and has stood still this long is let go (it has parked)
+const STOOD_MS = 3000; // a thing that hasn't moved for this long is standing: where it stands is remembered
+const SPOT_KEEP_MS = 15000; // ... for this long after it was last seen there
+const SETTLED_MS = 800; // the subject still for this long on such a place: it is that parked thing, not the subject
+const BAN_MS = 5000; // an id the subject was lost on isn't taken up again for this long
 // Split view (`split`): a pane each for several things on the move.
 const SPLIT_IN_MS = 1000; // a second thing must be moving this long before the view splits
 const SPLIT_OUT_MS = 1500; // and only one left this long before it is one view again
@@ -1144,19 +1154,49 @@ class ProtectTrackingCard extends HTMLElement {
       const [px, py] = a.subjectBox ? centre(a.subjectBox) : [x, y];
       return Math.hypot(x - px, y - py);
     };
+    // where things stand: a subject must not end up on one of these
+    a.spots = a.spots || new Map();
+    a.banned = a.banned || new Map();
+    for (const n of all) {
+      if (n.of != null || n.t.id === a.subject) continue;
+      if (at - n.t.moved > STOOD_MS && at - n.t.first > STOOD_MS) a.spots.set(n.t.id, { box: n.box, type: n.t.type, at: now });
+    }
+    for (const [id, spot] of a.spots) if (now - spot.at > SPOT_KEEP_MS) a.spots.delete(id);
+    for (const [id, when] of a.banned) if (now - when > BAN_MS) a.banned.delete(id);
+    const over = (p, q) => {
+      const w = Math.min(p[0] + p[2], q[0] + q[2]) - Math.max(p[0], q[0]);
+      const h = Math.min(p[1] + p[3], q[1] + q[3]) - Math.max(p[1], q[1]);
+      return w > 0 && h > 0 ? (w * h) / (p[2] * p[3] + q[2] * q[3] - w * h) : 0;
+    };
+    const lingerMs = Math.max(1, Number(cfg.linger) || 10) * 1000;
     let subject = mine.find((n) => n.t.id === a.subject) || null;
-    if (subject && subject.t.type !== "person" && at - subject.t.moved > PARKED_MS) subject = null; // it has parked
+    if (subject) {
+      const t = subject.t;
+      const still = at - Math.max(t.went, t.first); // how long its box hasn't moved
+      let lost = false;
+      // it jumped across the picture between two looks: not the same thing any more
+      if (a.subjectBox && now - a.subjectAt < 400 && far(subject.box) > Math.max(150, 1.5 * Math.max(a.subjectBox[2], a.subjectBox[3]))) lost = true;
+      // it has come to rest where something of its kind has been standing: that thing, under the subject's id
+      else if (still > SETTLED_MS && [...a.spots].some(([id, spot]) => id !== t.id && spot.type === t.type && over(subject.box, spot.box) > 0.45)) lost = true;
+      // it isn't a person and hasn't moved for the linger: it has parked
+      else if (t.type !== "person" && still > lingerMs) lost = true;
+      if (lost) {
+        a.banned.set(t.id, now);
+        a.subject = null;
+        subject = null;
+        a.view.want = null; // (no staying a moment on where it was: that is the wrong thing)
+      }
+    }
     if (!subject) {
-      const tr = lt.tracks.get(a.subject);
+      const tr = a.subject == null ? null : lt.tracks.get(a.subject);
       const early = !!tr && tr.pts.length > 0 && tr.pts[0][0] > at; // (reported, but that moment isn't on screen yet)
-      const parked = !!tr && at - tr.moved > PARKED_MS;
       if (!early) {
-        const free = mine.filter((n) => moving(n) && n.t.id !== a.subject);
+        const free = mine.filter((n) => moving(n) && n.t.id !== a.subject && !a.banned.has(n.t.id));
         free.sort((p, q) => far(p.box) - far(q.box));
         const next = free[0];
         // its reports going on under another id, right where it was: the same subject
         const same = next && a.subjectBox && now - a.subjectAt < HANDOVER_MS && far(next.box) <= Math.max(80, a.subjectBox[2], a.subjectBox[3]);
-        if (next && (same || parked || now - a.subjectAt > SWITCH_MS)) {
+        if (next && (same || now - a.subjectAt > SWITCH_MS)) {
           a.subject = next.t.id;
           subject = next;
         }
@@ -1167,9 +1207,9 @@ class ProtectTrackingCard extends HTMLElement {
       a.subjectBox = subject.box;
     }
     // what keeps the picture up: the subject, or something moving that it could go over to
-    if (subject || mine.some(moving)) a.seen = now;
+    if (subject || mine.some((n) => moving(n) && !a.banned.has(n.t.id))) a.seen = now;
     // boxed: the subject, and whatever else of a watched kind is on the move (parked things are not)
-    const shown = mine.filter((n) => n === subject || moving(n));
+    const shown = mine.filter((n) => n === subject || (moving(n) && !a.banned.has(n.t.id)));
     // faces found on those drawn: boxed with them, never followed or counted by themselves
     const drawn = new Set([...shown, ...others].map((n) => String(n.t.id)));
     const parts = all.filter((n) => n.of != null && drawn.has(n.of));
@@ -1235,6 +1275,8 @@ class ProtectTrackingCard extends HTMLElement {
           ev.stopPropagation();
           a.subject = t.id;
           a.subjectAt = Date.now();
+          a.subjectBox = null; // (a choice, not a jump)
+          if (a.banned) a.banned.delete(t.id);
         };
         layer.appendChild(el);
         a.els.set(t.id, el);
