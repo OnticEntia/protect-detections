@@ -85,6 +85,7 @@ Best in a view of type *Panel*. With no options it shows one feed per UniFi Prot
 | `live_delay` | `700` | Milliseconds the live picture is held back while Boxes is on, so boxes line up with it. |
 | `live_offset` | `0` | Milliseconds to draw the boxes later (+) or earlier (−). |
 | `live_debug` | `false` | `true` writes on the live picture how the boxes are being timed (see Troubleshooting). |
+| `source` | `auto` | Whose positions the live boxes and tracking tiles use: `auto`, `local` or `protect` (see [Protect Tracker](#companions)). |
 | `zone_overlay` | `true` | `false` never shows zones (needs Protect Zones' overlay). |
 | `phone_landscape` | `true` | `false` keeps the dialog upright on a phone. |
 
@@ -128,6 +129,7 @@ Watches every camera that recognises things and shows whichever one sees a perso
 | `aspect_ratio` | `1.7778` | Width / height, where the view does not set the height. |
 | `height` | – | A fixed height instead (`300`, `300px`, `40vh`). |
 | `live_delay`, `live_offset`, `live_debug` | `700`, `0`, `false` | As on the camera wall. |
+| `source` | `auto` | Whose positions it follows: `auto`, `local` or `protect` (see [Protect Tracker](#companions)). |
 | `sound` | `none` | A sound when it starts following: `ping` (a rising ping), `chirp` (a two-tone scanner chirp), `sweep` (a soft sweep) or `lock` (three blips and a tone). |
 | `sound_volume` | `0.5` | How loud, from `0` to `1`. |
 | `sound_gap` | `25` | Seconds the card stays quiet after it has sounded. |
@@ -165,6 +167,8 @@ Both are optional features of the cards, but see the note on Protect Zones.
 
 - **[Protect Zones](https://github.com/OnticEntia/protect-zones)** – **required** for this integration to load, because it provides the connection to Protect that both share. It also adds what the cards use for zones: the zone overlay in the camera dialog, zone editing for administrators, "occupied" badges on the wall, and zone names in the tracking card.
 - **[Protect Rules](https://github.com/OnticEntia/protect-rules)** – rules on top of detections. Its card uses this integration's clip player. Not needed otherwise.
+
+- **Protect Tracker** – optional. An integration that follows things frame by frame on your own machine and sends their positions in the same form as Protect's, as often as the camera has frames. With `source: auto` (the default) the cards use it when it is installed and Protect's own positions (about four a second) when it isn't; it is found by itself if installed later. `source: local` insists on it, and the card says so if it is missing; `source: protect` never uses it. When there is a choice, a small mark shows which is in use: "local" or "Protect" on the tracking card, and beside *Boxes* in the live view.
 
 HACS installs one repository at a time and does not install Protect Zones for you. If it is missing, adding Protect Detections stops with "Protect Zones isn't installed"; an entry that already exists fails to set up with the same message and a notice appears under **Settings → Repairs**. Install Protect Zones, restart Home Assistant, and reload Protect Detections.
 

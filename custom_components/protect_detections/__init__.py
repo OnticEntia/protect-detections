@@ -195,7 +195,11 @@ class DetectionHub:
             }
 
     def smart_cameras(self) -> list[str]:
-        """The cameras (Protect ids) that recognise things, so have live tracking."""
+        """The cameras (Protect ids) that recognise things, so have live tracking.
+
+        Other integrations use this and `hub.live.subscribe(camera_id, send)`
+        (the Protect Tracker integration does): the two are kept as they are.
+        The hub itself is `hass.data["protect_detections"]`."""
         api = self.api
         out = []
         for cam in api.bootstrap.cameras.values() if api is not None else []:

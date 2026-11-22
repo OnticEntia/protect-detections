@@ -148,6 +148,10 @@ class LiveTracks:
 
     @callback
     def subscribe(self, camera_id: str, send: Send) -> Callable[[], None]:
+        """Have `send` called with each of that camera's messages (see compact();
+        or {"status": "connected" | "disconnected" | "error"}); returns the
+        function that ends it. Called from the event loop. Also used by other
+        integrations (Protect Tracker), so its shape is kept."""
         feed = self.feeds.get(camera_id)
         if feed is None:
             feed = self.feeds[camera_id] = _Feed(self, camera_id)

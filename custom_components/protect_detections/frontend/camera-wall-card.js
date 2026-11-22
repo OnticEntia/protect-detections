@@ -120,6 +120,9 @@
  *   live_tracks: false                      # optional: no Boxes button
  *   live_delay: 700                         # optional: ms the picture is held back
  *                                           # while Boxes is on (WebRTC)
+ *   source: auto                            # optional: whose positions the boxes are:
+ *                                           # auto (the Protect Tracker integration's when
+ *                                           # installed, else Protect's own) | local | protect
  *   live_offset: 0                          # optional: ms to draw the boxes later (+)
  *                                           # or earlier (-), if they don't sit right
  *   phone_landscape: false                  # optional: on a phone, don't turn the
@@ -134,7 +137,7 @@
 // served from one folder whose address carries the integration's version,
 // so a new version is a new address for every file at once.
 import { findProtectCameras } from "./protect-cameras.js";
-import { LiveTracks, LIVE_COLORS } from "./protect-live.js";
+import { LiveTracks, LIVE_COLORS, subscribeLive } from "./protect-live.js";
 import "./protect-tracking-card.js";
 
 const GAP = 12;
@@ -332,6 +335,7 @@ const LIVE_STYLE = `
   .frame .zoom { position: absolute; inset: 0; transform-origin: 0 0; }
   .frame.zoomed { cursor: grab; touch-action: none; }
   /* what the camera is tracking, live */
+  .lbox[data-src]::after { content: " · " attr(data-src); font-weight: 400; opacity: .75; }
   .lboxes { position: absolute; pointer-events: none; }
   .ldebug { position: absolute; left: 8px; bottom: 8px; max-width: calc(100% - 16px); padding: 3px 7px; border-radius: 4px; background: rgba(0,0,0,.7); color: #fff;
     font: 11px/1.4 ui-monospace, monospace; pointer-events: none; z-index: 3; }
@@ -2390,7 +2394,8 @@ class CameraWallCard extends HTMLElement {
   // user chose for this one from its menu.
   _trackConfig(x) {
     const own = (this._arr && this._arr.opts && this._arr.opts[x.key]) || {};
-    return { ...x.base, ...own };
+    // (the wall's `source` goes for its tracking tiles too, unless one says otherwise)
+    return { ...(this._config.source ? { source: this._config.source } : {}), ...x.base, ...own };
   }
 
   // What every tile is known by when arranged: the cameras', then the
@@ -2784,14 +2789,19 @@ class CameraWallCard extends HTMLElement {
     if (!lt || lt.entity !== entity) {
       this._ltStop();
       lt = this._lt = Object.assign(new LiveTracks(), { entity, els: new Map(), placeAt: 0, place: null });
-      Promise.resolve(this._hass.connection.subscribeMessage((msg) => this._lt === lt && this._ltMessage(lt, msg), { type: "protect_detections/live/subscribe", entity })).then(
-        (unsub) => {
-          if (this._lt === lt) lt.unsub = unsub;
-          else Promise.resolve(unsub()).catch(() => {}); // stopped meanwhile
-        },
-        (err) => {
-          if (err && err.code === "unknown_command") this._ltNone = true;
-          if (this._lt === lt) this._ltStop();
+      // (whose positions: see `source` in protect-live.js)
+      lt.stop = subscribeLive(
+        this._hass,
+        entity,
+        cfg.source,
+        (msg) => this._lt === lt && this._ltMessage(lt, msg),
+        (st) => {
+          if (this._lt !== lt) return;
+          lt.using = st.using;
+          this._ltMark(lt);
+          if (st.using || cfg.source === "local") return; // (local, not there: said on the button; it is looked for again)
+          if (st.code === "unknown_command") this._ltNone = true;
+          this._ltStop();
           this._ltSync(); // (hides the buttons if it is gone)
         }
       );
@@ -2815,11 +2825,8 @@ class CameraWallCard extends HTMLElement {
     if (!lt) return;
     this._lt = null;
     cancelAnimationFrame(lt.raf);
-    if (lt.unsub) {
-      try {
-        Promise.resolve(lt.unsub()).catch(() => {});
-      } catch (e) {}
-    }
+    if (lt.stop) lt.stop();
+    this._ltMark(null);
     this._ltHold(0); // the picture as live as it gets again
     const layer = this._liveRoot && this._liveRoot.querySelector(".lboxes");
     if (layer) {
@@ -2829,7 +2836,26 @@ class CameraWallCard extends HTMLElement {
   }
 
   _ltMessage(lt, msg) {
+    const was = lt.source;
     lt.message(msg);
+    if (lt.source !== was) this._ltMark(lt);
+  }
+
+  // Whose positions the boxes are, said on the Boxes button when there is a
+  // choice (Protect Tracker in use, or `source` set).
+  _ltMark(lt) {
+    const btn = this._liveRoot && this._liveRoot.querySelector(".lbox");
+    if (!btn) return;
+    const cfg = this._config;
+    let text = "";
+    if (lt && (lt.using === "tracker" || cfg.source)) {
+      if (!lt.using) text = cfg.source === "local" ? "no tracker" : "";
+      else text = (lt.source || (lt.using === "tracker" ? "local" : "protect")) === "local" ? "local" : "Protect";
+    }
+    if (text) btn.setAttribute("data-src", text);
+    else btn.removeAttribute("data-src");
+    if (btn._title == null) btn._title = btn.title || "";
+    btn.title = text === "local" ? "Boxes from Protect Tracker, frame by frame" : text === "no tracker" ? "Protect Tracker isn't answering (source: local)" : text ? "Boxes from Protect" : btn._title;
   }
 
   static _ltAt(t, at) {

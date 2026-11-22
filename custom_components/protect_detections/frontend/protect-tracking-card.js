@@ -41,6 +41,9 @@
  *   live_delay: 700                         # ms the picture is held back so the boxes
  *                                           # line up with it (see protect-live.js)
  *   live_offset: 0                          # ms to place the boxes later (+) / earlier (-)
+ *   source: auto                            # whose positions: auto (the Protect Tracker
+ *                                           # integration's when it is installed, else
+ *                                           # Protect's own) | local | protect
  *   live_debug: false                       # true: write on the picture how the boxes
  *                                           # are being timed
  *   sound: none                             # a sound when it starts following someone:
@@ -74,7 +77,7 @@
 
 // Shared with the other cards here (served from the same folder).
 import { findProtectCameras } from "./protect-cameras.js";
-import { LiveTracks, LIVE_COLORS, deepFind, pictureBox } from "./protect-live.js";
+import { LiveTracks, LIVE_COLORS, LIVE_SOURCES, subscribeLive, deepFind, pictureBox } from "./protect-live.js";
 
 const KINDS = { person: ["Person", "people"], vehicle: ["Vehicle", "vehicles"], animal: ["Animal", "animals"], package: ["Package", "packages"] };
 const STANDBY = ["radar", "pulse", "scanline", "none"]; // how standing by looks
@@ -351,6 +354,8 @@ const STYLE = `
     line-height: 16px; background: rgba(0,0,0,.62); color: #fff; white-space: nowrap; }
   .chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c, #e0102a); }
   .chip.live i { animation: pulse 1.2s infinite; }
+  .chip.src { font-weight: 500; font-size: 11px; padding: 2px 7px; opacity: .75; }
+  .chip.src[hidden] { display: none; }
   .chip.warn { background: color-mix(in srgb, var(--warning-color, #fbbf24) 80%, #000); color: #000; }
   @keyframes pulse { 50% { opacity: .25; } }
 `;
@@ -366,6 +371,7 @@ class ProtectTrackingCard extends HTMLElement {
       throw new Error("protect-tracking-card: 'types' must be a list such as [person]");
     }
     if (config.camera != null && typeof config.camera !== "string") throw new Error("protect-tracking-card: 'camera' must be a camera entity");
+    if (config.source != null && !LIVE_SOURCES.includes(config.source)) throw new Error(`protect-tracking-card: 'source' is one of ${LIVE_SOURCES.join(", ")}`);
     if (typeof config.sound === "string" && config.sound !== "none" && !SOUNDS[config.sound]) {
       throw new Error(`protect-tracking-card: 'sound' is one of none, ${Object.keys(SOUNDS).join(", ")}`);
     }
@@ -524,7 +530,7 @@ class ProtectTrackingCard extends HTMLElement {
           <div class="zoomer"><div class="video"></div><div class="boxes"></div></div>
           <div class="scan"><div class="grid"></div><div class="sweep"></div><div class="rings"><i></i><i></i><i></i></div><div class="line"></div><div class="blips"></div><div class="reticle"></div></div>
           <div class="idle"><ha-icon icon="mdi:account-eye-outline"></ha-icon><b></b><span></span><small></small><small class="note"></small></div>
-          <div class="top"><span class="chip live"><i></i><span class="cam"></span></span><span class="chip warn" hidden></span></div>
+          <div class="top"><span class="chip live"><i></i><span class="cam"></span></span><span class="chip src" hidden></span><span class="chip warn" hidden></span></div>
           <div class="info"></div>
           <div class="dbg" hidden></div>
           <button class="snd" type="button" hidden><ha-icon></ha-icon></button>
@@ -691,18 +697,27 @@ class ProtectTrackingCard extends HTMLElement {
     this._subs = this._subs || new Map();
     for (const cam of cams) {
       if (this._subs.has(cam.id)) continue;
-      const sub = { cam, lt: new LiveTracks(), unsub: null, matchAt: 0 };
+      const sub = { cam, lt: new LiveTracks(), stop: null, using: null, matchAt: 0 };
       this._subs.set(cam.id, sub);
-      Promise.resolve(this._hass.connection.subscribeMessage((msg) => this._subs && this._subs.get(cam.id) === sub && this._message(sub, msg), { type: "protect_detections/live/subscribe", entity: cam.entity })).then(
-        (unsub) => {
-          if (this._subs && this._subs.get(cam.id) === sub) sub.unsub = unsub;
-          else Promise.resolve(unsub()).catch(() => {});
-        },
-        (err) => {
-          if (this._subs && this._subs.get(cam.id) === sub) this._subs.delete(cam.id);
-          this._note = err && err.code === "unknown_command" ? "" : "Couldn't start listening for this camera";
-          if (err && err.code === "unknown_command") this._state = "norelay";
-          this._idle();
+      const mine = () => this._subs && this._subs.get(cam.id) === sub;
+      sub.stop = subscribeLive(
+        this._hass,
+        cam.entity,
+        this._config.source,
+        (msg) => mine() && this._message(sub, msg),
+        (st) => {
+          if (!mine()) return;
+          sub.using = st.using;
+          if (st.using) {
+            if (this._srcNote) this._note = "";
+            this._srcNote = false;
+          } else if (this._config.source === "local") {
+            // asked for by name: said, and it is looked for again by itself
+            this._note = st.code === "unknown_command" ? "Protect Tracker isn't installed (source: local)" : "Protect Tracker isn't answering (source: local)";
+            this._srcNote = true;
+          } else if (st.code === "unknown_command") this._state = "norelay";
+          else this._note = "Couldn't start listening for this camera";
+          if (!this._active) this._idle();
         }
       );
     }
@@ -721,11 +736,7 @@ class ProtectTrackingCard extends HTMLElement {
   _stopAll() {
     this._leave();
     for (const sub of (this._subs && this._subs.values()) || []) {
-      if (sub.unsub) {
-        try {
-          Promise.resolve(sub.unsub()).catch(() => {});
-        } catch (e) {}
-      }
+      if (sub.stop) sub.stop();
     }
     this._subs = null;
     if (this._warm) {
@@ -958,6 +969,14 @@ class ProtectTrackingCard extends HTMLElement {
       const failed = !a.playing && now - a.since > FAIL_MS;
       warn.hidden = !failed;
       if (failed) warn.textContent = "The live picture didn't start";
+      // whose positions these are, when there is a choice
+      const src = root.querySelector(".chip.src");
+      const by = lt.source || (a.sub.using === "tracker" ? "local" : "protect");
+      src.hidden = !(a.sub.using === "tracker" || cfg.source);
+      if (!src.hidden) {
+        src.textContent = by === "local" ? "local" : "Protect";
+        src.title = by === "local" ? "Positions from Protect Tracker, frame by frame" : a.sub.using === "tracker" ? "Positions from Protect, passed on by Protect Tracker" : "Positions from Protect";
+      }
       // live_debug: how the boxes are being timed
       const dbg = root.querySelector(".dbg");
       dbg.hidden = !cfg.live_debug;

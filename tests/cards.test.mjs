@@ -54,7 +54,7 @@ const ctx = { window: win, document: { createElement: (t) => (defs[t] ? new defs
 Object.assign(win, { customCards: [], innerWidth: 1200, innerHeight: 800, scrollY: 0 }); ctx.globalThis = ctx;
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(FRONTEND + "protect-cameras.js", "utf8").replace(/^export /m, "") + "\n;globalThis.findProtectCameras = findProtectCameras;", ctx);
-vm.runInContext(fs.readFileSync(FRONTEND + "protect-live.js", "utf8").replace(/^export /gm, "") + "\n;Object.assign(globalThis, { LiveTracks, LIVE_COLORS, LIVE_DELAY_MS, deepFind, pictureBoxShared: pictureBox });", ctx);
+vm.runInContext(fs.readFileSync(FRONTEND + "protect-live.js", "utf8").replace(/^export /gm, "") + "\n;Object.assign(globalThis, { LiveTracks, LIVE_COLORS, LIVE_DELAY_MS, LIVE_SOURCES, subscribeLive, deepFind, pictureBoxShared: pictureBox });", ctx);
 vm.runInContext("{" + plain(fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8")) + "}", ctx);
 for (const f of [FRONTEND + "protect-detection-card.js", FRONTEND + "camera-wall-card.js"]) vm.runInContext(plain(fs.readFileSync(f, "utf8")) + "\n;globalThis.swipeStep = typeof swipeStep === 'function' ? swipeStep : globalThis.swipeStep; globalThis.todayStr = typeof todayStr === 'function' ? todayStr : globalThis.todayStr;", ctx);
 const Det = defs["protect-detection-card"], Wall = defs["camera-wall-card"]; const Trk = defs["protect-tracking-card"];
@@ -764,19 +764,19 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const frameAt = (ourMs) => { const real = Date.now; Date.now = () => ourMs; try { w._ltFrame(lt); } finally { Date.now = real; } };
   lt.statsAt = 0; frameAt(T0 + 1500); await tick(); await tick();
   ok(recv.every((r) => r.jitterBufferTarget === 700) && lt.kind === "webrtc" && lt.can === true, "WebRTC: the browser is asked to hold 700 ms of picture, sound included");
-  const behind = w._ltBehind(lt); ok(Math.abs(behind - (100 + 700)) < 1 && lt.sync === "estimate", "until it says what it really holds, that is what is counted on (on top of what the camera's second stream is behind)");
-  // on screen at our T0+1500: the camera's moment T0+1500-500+330-800 = T0+530 -> x between 200 and 250
+  const behind = w._ltBehind(lt); ok(Math.abs(behind - 700) < 1 && lt.sync === "estimate", "until it says what it really holds, that is what is counted on");
+  // on screen at our T0+1500: the camera's moment T0+1500-500+330-700 = T0+630 -> x between 200 and 250
   lt.placeAt = 0; frameAt(T0 + 1500);
   const layer = root.querySelector(".lboxes"); const box = lt.els.get("1");
   console.log("   box:", box && box.style.cssText, "| layer:", layer.style.cssText);
-  ok(!!box && /left:20\.6\d%/.test(box.style.cssText) && box.firstChild.textContent === "Vehicle · gray suv" && box.style.cssText.includes("#4ea8ff"), "the box is drawn where the thing was at the moment now on screen, coloured and named by kind");
+  ok(!!box && /left:22\.6\d%/.test(box.style.cssText) && box.firstChild.textContent === "Vehicle · gray suv" && box.style.cssText.includes("#4ea8ff"), "the box is drawn where the thing was at the moment now on screen, coloured and named by kind");
   ok(!lt.els.has("9"), "something parked gets no box");
   ok(/left:0\.0px;top:0\.0px;width:1600\.0px;height:900\.0px/.test(layer.style.cssText), "the boxes lie over the picture");
   // what the browser really holds, once it says
   lt.statsAt = 0; pc.getStats = () => Promise.resolve(new Map([["v", { type: "inbound-rtp", kind: "video", jitterBufferDelay: 70 + 0.6 * 50, jitterBufferEmittedCount: 150 }]])); frameAt(T0 + 1500); await tick(); await tick();
-  ok(Math.abs(lt.jb - 600) < 1 && Math.abs(w._ltBehind(lt) - 700) < 1, "then the held-back time is the measured one");
+  ok(Math.abs(lt.jb - 600) < 1 && Math.abs(w._ltBehind(lt) - 600) < 1, "then the held-back time is the measured one");
   // calibration
-  w._config.live_offset = 100; ok(Math.abs(w._ltBehind(lt) - 800) < 1, "live_offset draws the boxes that much later"); delete w._config.live_offset;
+  w._config.live_offset = 100; ok(Math.abs(w._ltBehind(lt) - 700) < 1, "live_offset draws the boxes that much later"); delete w._config.live_offset;
   // talking: no delay
   w._talk = { live: true }; lt.statsAt = 0; frameAt(T0 + 1500); ok(recv.every((r) => r.jitterBufferTarget === null), "while talking the picture isn't held back"); w._talk = null; lt.statsAt = 0; frameAt(T0 + 1500);
   ok(recv.every((r) => r.jitterBufferTarget === 700), "and is again afterwards");
@@ -791,8 +791,8 @@ ok(w._built && !w._building, "next good config builds after a failure");
   {
     const m = new ctx.LiveTracks(); const real = Date.now;
     const st = Object.assign(new El(), { querySelectorAll: () => [rtc, vid], isConnected: true, stateObj: { attributes: { channel_id: 0 } } });
-    ok(Math.abs(m.behind(st, {}) - (0 + 700)) < 1 && m.channel === 0, "the main stream: counted as less far behind");
-    st.stateObj = { attributes: { channel_id: 1 } }; m.statsAt = 0; ok(Math.abs(m.behind(st, {}) - (100 + 700)) < 1 && m.channel === 1, "the second stream: further");
+    ok(Math.abs(m.behind(st, {}) - (0 + 700)) < 1 && m.channel === 0, "the main stream: its own figure");
+    st.stateObj = { attributes: { channel_id: 1 } }; m.statsAt = 0; ok(Math.abs(m.behind(st, {}) - (0 + 700)) < 1 && m.channel === 1, "the second stream: measured to be the same");
     // where the browser tells which frame is on screen: exactly, by the frame's own timestamp
     let cb = null; const v2 = Object.assign(new El(), { tagName: "VIDEO", videoWidth: 1600, videoHeight: 900, requestVideoFrameCallback: (f) => { cb = f; return 1; } });
     const st2 = Object.assign(new El(), { querySelectorAll: () => [rtc, v2], isConnected: true, stateObj: { attributes: { channel_id: 0 } } });
@@ -809,15 +809,15 @@ ok(w._built && !w._building, "next good config builds after a failure");
     const b2 = at(2000, () => x.behind(st2, {})); const mom = at(2000, () => x.moment(b2));
     ok(x.sync === "rtp" && Math.abs(mom - (cam(2000 - 900) + 125)) < 2, "a frame's timestamp: the moment on screen is that frame's (and what positions are stamped after frames on the main stream), whatever the delays were: " + Math.round(mom - cam(1100)));
     st2.stateObj = { attributes: { channel_id: 1 } }; x.statsAt = 0; const b3 = at(2000, () => x.behind(st2, {}));
-    ok(Math.abs(at(2000, () => x.moment(b3)) - (cam(1100) + 25)) < 2, "on the second stream: its own figure");
-    ok(Math.abs(at(2000, () => x.moment(x.behind(st2, { offset: 100 }))) - (cam(1100) + 25 - 100)) < 2, "live_offset still trims it");
-    ok(Math.abs(at(2030, () => x.moment(x.behind(st2, {}))) - (cam(1100) + 25)) < 2, "the same frame still on screen a little later: the same moment (the boxes go with the picture)");
+    ok(Math.abs(at(2000, () => x.moment(b3)) - (cam(1100) + 125)) < 2, "on the second stream: its own figure");
+    ok(Math.abs(at(2000, () => x.moment(x.behind(st2, { offset: 100 }))) - (cam(1100) + 125 - 100)) < 2, "live_offset still trims it");
+    ok(Math.abs(at(2030, () => x.moment(x.behind(st2, {}))) - (cam(1100) + 125)) < 2, "the same frame still on screen a little later: the same moment (the boxes go with the picture)");
     ok(/webrtc · second stream · by frame timestamps · picture \d+ ms behind · held .* · frame \d+ ms older/.test(at(2000, () => x.describe(x.behind(st2, {})))), "it can say how it is timing: " + at(2000, () => x.describe(x.behind(st2, {}))));
     // a timestamp that is some other clock: not believed
     at(2000, () => cb(0, { rtpTimestamp: rtpOf(S0 + 2000 - 900 + 3_600_000) }));
-    ok(Math.abs(at(2000, () => x.behind(st2, {})) - 800) < 1 && x.sync === "estimate" && /don't add up/.test(x.describe(0)), "frame timestamps on some other clock: not used, the estimate instead");
+    ok(Math.abs(at(2000, () => x.behind(st2, {})) - 700) < 1 && x.sync === "estimate" && /don't add up/.test(x.describe(0)), "frame timestamps on some other clock: not used, the estimate instead");
     // no timestamp in what the browser tells, or the frames stop coming
-    at(2000, () => cb(0, {})); ok(at(2000, () => x.behind(st2, {})) === 800 && x.sync === "estimate", "a browser that gives no frame timestamps: the estimate");
+    at(2000, () => cb(0, {})); ok(at(2000, () => x.behind(st2, {})) === 700 && x.sync === "estimate", "a browser that gives no frame timestamps: the estimate");
     at(2000, () => cb(0, { rtpTimestamp: rtpOf(S0 + 2000 - 900) })); ok(at(2100, () => (x.behind(st2, {}), x.sync)) === "rtp" && at(4000, () => (x.behind(st2, {}), x.sync)) === "estimate", "no new frame for a while (the picture stopped): the estimate again");
     // another player takes over: the old one is let go
     const v3 = Object.assign(new El(), { tagName: "VIDEO", requestVideoFrameCallback: () => 1 }); const old = cb;
@@ -1202,6 +1202,104 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const css = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8");
   ok(/\.frame\.warmlive:not\(\.active\) \.snap \{[^}]*visibility: hidden/.test(css) && /\.frame\.warmlive:not\(\.active\) \.zoomer \{ opacity: \.55/.test(css) && /\.frame\.warmlive\.s-none:not\(\.active\) \.zoomer \{ opacity: 1/.test(css), "live standing by: the still is put away and the picture dimmed (not dimmed with standby: none)");
   ok(css.indexOf(".frame.warmlive.s-none .idle {") > css.indexOf(".frame.s-none .idle {"), "(the rule for standby: none comes after the one it changes)");
+}
+// --- whose positions: Protect's own, or the Protect Tracker integration's
+{
+  ctx.document.hidden = false; ctx.localStorage.store = {};
+  const TR = "protect_tracker/live/subscribe", PR = "protect_detections/live/subscribe";
+  // a Home Assistant whose connection knows the commands in `have`, and timers that are fired by hand
+  const realTimeout = ctx.setTimeout; const later = [];
+  ctx.setTimeout = (f, ms) => (ms >= 100000 ? (later.push({ f, ms }), { later: f }) : realTimeout(f, ms));
+  const realClear = ctx.clearTimeout; ctx.clearTimeout = (t) => (t && t.later ? later.splice(later.findIndex((x) => x.f === t.later) >>> 0, t.later && later.some((x) => x.f === t.later) ? 1 : 0) : realClear(t));
+  const fire = async () => { const all = later.splice(0); for (const x of all) x.f(); await tick(); };
+  const mkConn = (have) => { const c = { have: new Set(have), open: new Map(), log: [], L: new Set(),
+    subscribeMessage(cb, m) { c.log.push(m.type); if (!c.have.has(m.type)) return Promise.reject({ code: "unknown_command" }); c.open.set(m.type, cb); return Promise.resolve(() => { c.log.push("stop " + m.type); c.open.delete(m.type); }); },
+    addEventListener(t, f) { if (t === "ready") c.L.add(f); }, removeEventListener(t, f) { c.L.delete(f); } }; return c; };
+  const run = async (have, source) => { const conn = mkConn(have); const got = []; const states = []; const stop = ctx.subscribeLive({ connection: conn }, "camera.x", source, (m) => got.push(m), (st) => states.push(st.using + (st.code ? ":" + st.code : ""))); await tick(); return { conn, got, states, stop }; };
+  ok(ctx.LIVE_SOURCES.join() === "auto,local,protect", "source: auto, local or protect");
+  // auto, Protect Tracker there
+  let r = await run([TR, PR], "auto");
+  ok(r.conn.log.join() === TR && r.states.join() === "tracker" && later.length === 0, "auto: Protect Tracker is installed, so it is listened to (and nothing else)");
+  r.conn.open.get(TR)({ clockWall: 1, source: "local", tracks: [] }); ok(r.got.length === 1, "its messages come through");
+  r.stop(); ok(r.conn.log.join() === [TR, "stop " + TR].join() && r.conn.L.size === 0, "stopped: unsubscribed, nothing left behind");
+  r.conn.open.set(TR, () => {}); ok(r.got.length === 1, "(and nothing more is passed on)");
+  // auto, no Protect Tracker: Protect's own, and it is looked for again
+  r = await run([PR], "auto");
+  ok(r.conn.log.join() === [TR, PR].join() && r.states.join() === "protect" && later.length === 1 && later[0].ms >= 100000, "auto without Protect Tracker: Protect's own positions, and Protect Tracker is looked for again later");
+  await fire(); ok(r.conn.log.join() === [TR, PR, TR].join() && r.states.join() === "protect" && r.conn.open.has(PR) && later.length === 1, "looked for and still not there: Protect's own carries on untouched");
+  r.conn.have.add(TR); await fire();
+  ok(r.conn.log.join() === [TR, PR, TR, TR, "stop " + PR].join() && r.states.join() === "protect,tracker" && r.conn.open.has(TR) && !r.conn.open.has(PR) && later.length === 0, "installed meanwhile: picked up without a reload, and Protect's own is let go");
+  // the connection comes back (Home Assistant restarted) without Protect Tracker
+  r.conn.have.delete(TR); r.conn.open.clear(); for (const f of [...r.conn.L]) f(); await tick();
+  ok(r.states.join() === "protect,tracker,protect" && r.conn.open.has(PR) && later.length === 1, "connection back and Protect Tracker gone: Protect's own again");
+  r.stop(); ok(later.length === 0 && !r.conn.open.has(PR), "stopped: no timer left");
+  // protect: never asks for the tracker
+  r = await run([TR, PR], "protect"); ok(r.conn.log.join() === PR && r.states.join() === "protect", "protect: Protect's own, Protect Tracker not asked"); r.stop();
+  r = await run([], "protect"); ok(r.states.join() === "null:unknown_command" && later.length === 0, "protect, and this integration's relay missing: said"); r.stop();
+  // local: by name
+  r = await run([PR], "local");
+  ok(r.conn.log.join() === TR && r.states.join() === "null:unknown_command" && later.length === 1, "local without Protect Tracker: said (no silent switch to Protect's), and looked for again");
+  r.conn.have.add(TR); await fire(); ok(r.states.join() === "null:unknown_command,tracker", "and used once it is there"); r.stop();
+  r = await run([], "auto"); ok(r.states.join() === "null:unknown_command", "auto with neither: said"); r.stop(); later.length = 0;
+  r = await run([TR, PR], "nonsense"); ok(r.states.join() === "tracker", "(an unknown source in the shared code counts as auto)"); r.stop();
+
+  // --- what a message says about its source
+  const lt = new ctx.LiveTracks();
+  lt.message({ clockWall: 1000, source: "local", tracks: [{ id: "a", coord: [1, 2, 3, 4], objectType: "person", local: true }, { id: "b", coord: [5, 6, 7, 8], objectType: "vehicle" }] });
+  ok(lt.source === "local" && lt.tracks.get("a").local === true && lt.tracks.get("b").local === false && /boxes: local \(Protect Tracker\)/.test(lt.describe(0)), "a message says who made its positions, and which things the local model made");
+  lt.message({ clockWall: 1250, source: "protect", tracks: [] }); ok(lt.source === "protect" && /boxes: Protect's/.test(lt.describe(0)), "Protect's, passed on by Protect Tracker: said too");
+  ok(new ctx.LiveTracks().describe(0).indexOf("boxes:") < 0, "this integration's own messages say nothing about it, and nothing is claimed");
+
+  // --- thirty reports a second
+  const fast = new ctx.LiveTracks(); const C0 = 1_700_000_000_000; const real = Date.now;
+  let n = 0; const t0 = performance.now();
+  for (let c = C0; c <= C0 + 60000; c += 33) { n++; Date.now = () => c + 400; fast.message({ clockWall: c, clockStream: c - 9, clockStreamRate: 1000, source: "local", tracks: [{ id: "v", coord: [100 + 0.01 * (c - C0) + (n % 2 ? 2 : -2), 400, 60, 40], objectType: "vehicle", local: true }] }); }
+  Date.now = real; const took = performance.now() - t0;
+  const pts = fast.tracks.get("v").pts;
+  ok(pts.length <= 30000 / 33 + 3 && pts[0][0] >= C0 + 60000 - 30000 - 33, `a minute at camera frame rate: only the last 30 s kept (${pts.length} positions)`);
+  ok(took < 1500, `and taking them in costs little (${Math.round(took)} ms for ${n} messages)`);
+  const lastC = pts[pts.length - 1][0]; const mid = Wall._ltAt(fast.tracks.get("v"), lastC - 1000 + 16);
+  ok(Math.abs(mid[0] - (100 + 0.01 * (lastC - 1000 + 16 - C0))) <= 2.1, "between two reports a frame apart: in between");
+  const ahead = Wall._ltAt(fast.tracks.get("v"), lastC + 300);
+  ok(Math.abs(ahead[0] - (100 + 0.01 * (lastC + 300 - C0))) < 6, `past the newest report it carries on at its real pace, the wobble between two frames not blown up (${(ahead[0] - (100 + 0.01 * (lastC + 300 - C0))).toFixed(1)} off)`);
+  const t1 = performance.now(); for (let k = 0; k < 6000; k++) fast.visible(lastC - 700 - (k % 500)); ok(performance.now() - t1 < 1500, `looking up where things are, a second or so back, stays cheap (${Math.round(performance.now() - t1)} ms for 6000 frames)`);
+
+  // --- the tracking card
+  const reg = { "camera.p_high_resolution_channel": { device_id: "d1", platform: "unifiprotect" } };
+  const states = { "camera.p_high_resolution_channel": { entity_id: "camera.p_high_resolution_channel", state: "recording", attributes: { channel_id: 0 } } };
+  const P = "camera.p_high_resolution_channel";
+  const mkc = async (cfg, have) => { const conn = mkConn(have);
+    const h = { ...hass, entities: reg, states, devices: { d1: { name: "Front" } }, connection: conn,
+      callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { [P]: "p1" } }); if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
+    const c = new Trk(); c.setConfig(cfg); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick(); c.conn = conn; return c; };
+  const person = (extra = {}) => ({ clockWall: Date.now() - 400, tracks: [{ id: "p", coord: [400, 400, 60, 160], objectType: "person" }], ...extra });
+  const chip = (c) => c._root.querySelector(".chip.src");
+  const note = (c) => c._root.querySelector(".idle .note").textContent;
+  let threw = false; try { new Trk().setConfig({ source: "gpu" }); } catch (e) { threw = true; } ok(threw, "tracking card: an unknown source is refused");
+  // nothing said, no Protect Tracker: exactly as before
+  let c = await mkc({}, [PR]);
+  ok(c.conn.open.has(PR) && !c._state && note(c) === "", "tracking card, no Protect Tracker: Protect's own positions, nothing said about it");
+  c.conn.open.get(PR)(person()); Object.assign(c._root.querySelector(".frame"), { clientWidth: 800, clientHeight: 450 }); c._active.placeAt = 0; c._frame(c._active);
+  ok(!!c._active && chip(c).hidden === true, "following, and no mark: there is no choice to show");
+  c.disconnectedCallback(); ok(later.length === 0 && c.conn.open.size === 0, "off the page: everything stopped, the looking-again too");
+  // Protect Tracker installed
+  c = await mkc({}, [TR, PR]);
+  ok(c.conn.open.has(TR) && !c.conn.open.has(PR), "tracking card with Protect Tracker installed: it is used by itself");
+  c.conn.open.get(TR)(person({ source: "local" })); c._active.placeAt = 0; c._frame(c._active);
+  ok(!!c._active && chip(c).hidden === false && chip(c).textContent === "local", "a person from the local model: followed, marked 'local'");
+  c.conn.open.get(TR)(person({ source: "protect" })); c._active.placeAt = 0; c._frame(c._active);
+  ok(chip(c).textContent === "Protect" && /passed on by Protect Tracker/.test(chip(c).title), "Protect Tracker falling back to Protect's positions: marked 'Protect'");
+  c._config.live_debug = true; c._active.placeAt = 0; c._frame(c._active); ok(/boxes: Protect's/.test(c._root.querySelector(".dbg").textContent), "and live_debug says it as well");
+  c.disconnectedCallback();
+  // told by name
+  c = await mkc({ source: "protect" }, [TR, PR]); ok(c.conn.open.has(PR) && !c.conn.open.has(TR), "source: protect leaves Protect Tracker alone");
+  c.conn.open.get(PR)(person()); c._active.placeAt = 0; c._frame(c._active); ok(chip(c).hidden === false && chip(c).textContent === "Protect", "and the mark shows the choice made"); c.disconnectedCallback();
+  c = await mkc({ source: "local" }, [PR]);
+  ok(!c._state && /Protect Tracker isn't installed/.test(note(c)) && !c.conn.open.has(PR) && later.length === 1, "source: local without Protect Tracker: the card says so (and doesn't quietly use Protect's)");
+  c.conn.have.add(TR); await fire(); ok(note(c) === "" && c.conn.open.has(TR), "once it is installed: the note goes and it is used");
+  c.disconnectedCallback();
+  c = await mkc({}, []); ok(c._state === "norelay", "neither there: as before, it says the integration is needed"); c.disconnectedCallback();
+  later.length = 0; ctx.setTimeout = realTimeout; ctx.clearTimeout = realClear; ctx.localStorage.store = {};
 }
 // --- tracking tiles on the wall
 {

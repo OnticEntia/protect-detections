@@ -26,7 +26,9 @@
  * How far the positions' stamps are from the frames' is measured in the
  * browser itself, against the picture (see _fitLook: what moves in each
  * frame against the boxes): on a camera's main stream the positions for a
- * frame are stamped about 125 ms after the frame is. There is no error in
+ * frame are stamped about 125 ms after the frame is (and much the same on
+ * its second stream, measured frame by frame outside the browser by the
+ * frames' own timestamps). There is no error in
  * place: the boxes are right where the timing is. (Measuring the same from
  * outside the browser, by when frames arrive, gave figures that were off by
  * hundreds of ms: a stream first sends what it has in hand, and arrival
@@ -37,8 +39,8 @@ export const LIVE_COLORS = { person: "#ff2d55", vehicle: "#4ea8ff", animal: "#34
 export const LIVE_DELAY_MS = 700; // how far the picture is held back so the positions can keep up with it
 const LIVE_TRANSIT_MS = 330; // the quickest a position gets here after its moment (measured)
 // By the camera's stream (0: main, others: the lighter ones), measured:
-const LIVE_STAMP_MS = [-125, -25]; // a frame's timestamp, against the clock its positions carry (minus: the positions' is later). Main stream: measured; the others: reckoned from it
-const LIVE_WEBRTC_BASE_MS = [0, 100]; // a position's moment to its frame on screen, without any held-back time (the same figures, said for the estimate)
+const LIVE_STAMP_MS = [-125, -125]; // a frame's timestamp, against the clock its positions carry (minus: the positions' is later). Measured on both: about -125 on the main stream, about -113 on the second
+const LIVE_WEBRTC_BASE_MS = [0, 0]; // a position's moment to its frame on screen, without any held-back time (the same figures, said for the estimate)
 const LIVE_AHEAD_MS = 300; // positions not here yet: a thing keeps moving as it did for this long, at most
 const RTP_WRAP_MS = 2 ** 32 / 90; // a video RTP timestamp (90 kHz) starts over after this
 // Checking the timing against the picture itself (live_debug): which "a
@@ -51,6 +53,109 @@ const LIVE_HLS_EXTRA_MS = 1500; // what an HLS picture is behind beyond what its
 const LIVE_KEEP_MS = 30000; // how long positions are kept (an HLS picture is seconds behind)
 const LIVE_HOLD_MS = 600; // a thing stays this long past its last report
 const LIVE_PARKED_MS = 5000; // not moved for this long: parked
+const LIVE_PACE_MS = 400; // how a thing is moving is taken from its reports of the last this long, when they come many a second
+
+// Where the positions come from.
+//  - "protect": Protect's own, through this integration (about 4 a second);
+//  - "local": the Protect Tracker integration, which follows things frame
+//    by frame on this machine and sends positions in the same shape, as
+//    often as the camera has frames (and passes Protect's on when it has
+//    none of its own);
+//  - "auto": Protect Tracker when it is installed, else Protect's.
+export const LIVE_SOURCES = ["auto", "local", "protect"];
+const LIVE_TYPES = { tracker: "protect_tracker/live/subscribe", protect: "protect_detections/live/subscribe" };
+const LIVE_RETRY_MS = 120000; // auto, without Protect Tracker: looked for again this often
+
+/**
+ * Listens to a camera's positions from the source asked for.
+ *   onMessage(msg)   every message (positions, or a status)
+ *   onState(state)   {using: "tracker" | "protect" | null, error, code}
+ *                    whenever what is listened to changes or fails
+ * Returns a function that stops it. With "auto", Protect Tracker is tried
+ * first and Protect's own is used while it isn't there; it is looked for
+ * again now and then, and when the connection to Home Assistant comes back
+ * (installing it later needs no reload).
+ */
+export function subscribeLive(hass, entity, source, onMessage, onState = () => {}) {
+  const want = LIVE_SOURCES.includes(source) ? source : "auto";
+  const conn = hass.connection;
+  let stopped = false;
+  let current = null; // {which, unsub}
+  let timer = null;
+  let trying = false;
+
+  const drop = (sub) => {
+    if (sub && sub.unsub) {
+      try {
+        Promise.resolve(sub.unsub()).catch(() => {});
+      } catch (e) {}
+    }
+  };
+  const listen = (which) => {
+    const sub = { which, unsub: null, dead: false };
+    return Promise.resolve(conn.subscribeMessage((msg) => !stopped && current === sub && onMessage(msg), { type: LIVE_TYPES[which], entity })).then((unsub) => {
+      sub.unsub = unsub;
+      return sub;
+    });
+  };
+  const use = (sub) => {
+    if (stopped) return drop(sub);
+    const old = current;
+    current = sub;
+    drop(old);
+    onState({ using: sub.which });
+  };
+  const again = () => {
+    clearTimeout(timer);
+    if (!stopped) timer = setTimeout(start, LIVE_RETRY_MS);
+  };
+  // (also run while Protect's own is in use, to look for Protect Tracker)
+  function start() {
+    if (stopped || trying) return;
+    trying = true;
+    const first = want === "protect" ? "protect" : "tracker";
+    listen(first)
+      .then(
+        (sub) => use(sub),
+        (err) => {
+          if (stopped) return null;
+          if (want !== "auto") {
+            // asked for by name and not there: said, and looked for again
+            if (!current) onState({ using: null, error: err, code: err && err.code });
+            if (want === "local") again();
+            return null;
+          }
+          again();
+          if (current) return null; // Protect's own is running: it stays
+          return listen("protect").then(
+            (sub) => use(sub),
+            (err2) => !stopped && onState({ using: null, error: err2, code: err2 && err2.code })
+          );
+        }
+      )
+      .then(
+        () => (trying = false),
+        () => (trying = false)
+      );
+  }
+  // the connection came back (Home Assistant restarted, perhaps with other integrations): from the start
+  const ready = () => {
+    if (stopped) return;
+    const old = current;
+    current = null;
+    drop(old);
+    start();
+  };
+  if (conn.addEventListener) conn.addEventListener("ready", ready);
+  start();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+    if (conn.removeEventListener) conn.removeEventListener("ready", ready);
+    drop(current);
+    current = null;
+  };
+}
 
 // Every element with one of these tag names under node, shadow roots included.
 export function deepFind(node, tags, out = []) {
@@ -100,6 +205,7 @@ export class LiveTracks {
     this.sync = "estimate"; // or "rtp": how the moment on screen was found
     this.lag = null; // (rtp) the frame on screen is this far behind the newest positions
     this.channel = 1;
+    this.source = null; // what the newest positions were made by, where the sender says: "local" | "protect"
     this.debug = false; // (live_debug) also check the timing against the picture
     this.fit = null; // {sum: per step, n, queue: frames waiting to be judged}
   }
@@ -110,6 +216,7 @@ export class LiveTracks {
     this.gaps.push(Date.now() - msg.clockWall);
     if (this.gaps.length > 120) this.gaps.shift();
     this.gap = Math.min(...this.gaps);
+    if (msg.source === "local" || msg.source === "protect") this.source = msg.source;
     const rate = Number(msg.clockStreamRate) || 1000;
     if (Number.isFinite(msg.clockStream)) this.clock = { wall: msg.clockWall, stream: (msg.clockStream * 1000) / rate, at: Date.now() };
     for (const tr of msg.tracks || []) {
@@ -118,6 +225,7 @@ export class LiveTracks {
       if (!t) this.tracks.set(tr.id, (t = { id: tr.id, type: tr.objectType || "object", desc: "", pts: [], moved: 0 }));
       if (tr.objectType) t.type = tr.objectType;
       if (tr.desc) t.desc = tr.desc;
+      t.local = tr.local === true; // (made by Protect Tracker's own model)
       if (Number.isFinite(tr.confidence)) t.confidence = tr.confidence;
       for (const key of ["zones", "loiterZones", "lines"]) if (Array.isArray(tr[key])) t[key] = tr[key];
       if (!tr.stationary) t.moved = msg.clockWall;
@@ -144,10 +252,34 @@ export class LiveTracks {
       const past = at - a[0];
       if (past > LIVE_HOLD_MS) return null;
       // its next position isn't here yet: it keeps moving as it just did, for a moment
-      const p = pts[i - 1];
-      if (!p || a[0] - p[0] > 600 || a[0] <= p[0]) return a.slice(1);
-      const f = Math.min(past, LIVE_AHEAD_MS) / (a[0] - p[0]);
-      return [a[1] + (a[1] - p[1]) * f, a[2] + (a[2] - p[2]) * f, a[3], a[4]];
+      // How it was moving. With a few reports a second: from the one before.
+      // With many (one a frame): the later half of the last 400 ms against
+      // the earlier half, so the small wobble between two frames isn't
+      // carried far.
+      let j = i;
+      while (j > 0 && a[0] - pts[j - 1][0] <= LIVE_PACE_MS) j--;
+      const n = i - j + 1;
+      let vx;
+      let vy;
+      if (n >= 4) {
+        const half = n >> 1;
+        const mean = (from, k) => {
+          let sum = 0;
+          for (let q = from; q < from + half; q++) sum += pts[q][k];
+          return sum / half;
+        };
+        const dt = mean(i - half + 1, 0) - mean(j, 0);
+        if (!(dt > 0)) return a.slice(1);
+        vx = (mean(i - half + 1, 1) - mean(j, 1)) / dt;
+        vy = (mean(i - half + 1, 2) - mean(j, 2)) / dt;
+      } else {
+        const p = pts[i - 1];
+        if (!p || a[0] - p[0] > 600 || a[0] <= p[0]) return a.slice(1);
+        vx = (a[1] - p[1]) / (a[0] - p[0]);
+        vy = (a[2] - p[2]) / (a[0] - p[0]);
+      }
+      const go = Math.min(past, LIVE_AHEAD_MS);
+      return [a[1] + vx * go, a[2] + vy * go, a[3], a[4]];
     }
     if (b[0] - a[0] > 2000) return at - a[0] <= LIVE_HOLD_MS ? a.slice(1) : null; // lost and found again
     const f = (at - a[0]) / (b[0] - a[0]);
@@ -360,6 +492,7 @@ export class LiveTracks {
   describe(behind) {
     const n = (v) => (v == null || !Number.isFinite(v) ? "?" : String(Math.round(v)));
     return [
+      this.source ? `boxes: ${this.source === "local" ? "local (Protect Tracker)" : "Protect's"}` : "",
       this.kind || "?",
       this.channel === 0 ? "main stream" : "second stream",
       this.sync === "rtp" ? "by frame timestamps" : "by estimate",
