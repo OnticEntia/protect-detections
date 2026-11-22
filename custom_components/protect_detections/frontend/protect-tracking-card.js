@@ -25,9 +25,10 @@
  *   snapshot: 60                            # seconds between still pictures behind the
  *                                           # standing-by text; 0 for none
  *   standby: radar                          # how standing by looks: radar (a sweep), pulse
- *                                           # (rings), scanline, static (thick black-and-
- *                                           # accent static, the picture glowing through it
+ *                                           # (rings), scanline, static (dense black-and-
+ *                                           # accent snow, the picture glowing through it
  *                                           # in black and white), or none (just the still)
+ *   static_grain: 2                         # static: px a speck (1 to 8)
  *   accent: "#e0102a"                       # the scanner's colour (default: the theme's
  *                                           # primary colour)
  *   warm: false                             # true: the live picture while standing by
@@ -163,31 +164,32 @@ import { LiveTracks, LIVE_COLORS, LIVE_SOURCES, subscribeLive, deepFind, picture
 const KINDS = { person: ["Person", "people"], vehicle: ["Vehicle", "vehicles"], animal: ["Animal", "animals"], package: ["Package", "packages"] };
 const STANDBY = ["radar", "pulse", "scanline", "static", "none"]; // how standing by looks
 
-// The "static" look's texture: coarse blocks, made once for the page, as a
-// picture in SVG (no canvas): four frames side by side, each STATIC_W x
-// STATIC_H blocks, some full, some half strength. It is used as a mask over
-// the accent colour, so the static is black and the card's own red; stepping
-// along the four frames a few times a second is all the animation there is.
-const STATIC_W = 48;
-const STATIC_H = 27;
-const STATIC_FRAMES = 4;
+// The "static" look's texture: specks like analogue TV snow, made once for
+// the page as a picture in SVG (no canvas): a square of STATIC_N x STATIC_N
+// specks, some full, some half strength. It is used as a mask over the accent
+// colour (so the static is black and the card's own red), laid side by side
+// at a fixed size in CSS pixels: one speck is `static_grain` px (2 by
+// default) whatever the card's size, so a bigger card shows more of it, not
+// bigger specks. Being a drawing, not a bitmap, it stays sharp on any
+// screen. Jumping the whole pattern to another place many times a second is
+// all the animation there is, and is what makes it shimmer.
+const STATIC_N = 80;
+const STATIC_GRAIN = 2; // px a speck, unless `static_grain` says otherwise
 let staticUrl = null;
 function staticTexture() {
   if (staticUrl) return staticUrl;
   let full = "";
   let half = "";
-  for (let f = 0; f < STATIC_FRAMES; f++) {
-    for (let y = 0; y < STATIC_H; y++) {
-      for (let x = 0; x < STATIC_W; x++) {
-        const r = Math.random();
-        // (runs of two blocks now and then, for a torn look rather than salt and pepper)
-        const w = r < 0.08 && x < STATIC_W - 1 ? 2 : 1;
-        if (r < 0.3) full += `M${f * STATIC_W + x} ${y}h${w}v1h-${w}z`;
-        else if (r < 0.52) half += `M${f * STATIC_W + x} ${y}h1v1h-1z`;
-      }
+  for (let y = 0; y < STATIC_N; y++) {
+    for (let x = 0; x < STATIC_N; x++) {
+      const r = Math.random();
+      // (runs of two or three now and then: streaks, as on a real screen, not salt and pepper)
+      const w = r < 0.07 && x < STATIC_N - 2 ? 2 + (r < 0.02 ? 1 : 0) : 1;
+      if (r < 0.36) full += `M${x} ${y}h${w}v1h-${w}z`;
+      else if (r < 0.6) half += `M${x} ${y}h1v1h-1z`;
     }
   }
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${STATIC_W * STATIC_FRAMES} ${STATIC_H}" preserveAspectRatio="none" shape-rendering="crispEdges"><path d="${full}"/><path opacity=".42" d="${half}"/></svg>`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${STATIC_N} ${STATIC_N}" shape-rendering="crispEdges"><path d="${full}"/><path opacity=".45" d="${half}"/></svg>`;
   staticUrl = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
   return staticUrl;
 }
@@ -494,9 +496,10 @@ const STYLE = `
   /* --- static: thick black-and-accent static, with the picture (the live one with warm, else the still)
      in black and white, added on top so that its bright parts glow through */
   .noise { position: absolute; inset: 0; display: none; pointer-events: none; background: var(--tracking-accent, var(--primary-color, #e0102a));
-    -webkit-mask-image: var(--static); mask-image: var(--static); -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
-    -webkit-mask-size: 400% 100%; mask-size: 400% 100%; -webkit-mask-position: 0 0; mask-position: 0 0;
-    animation: trk-static .44s steps(4, jump-none) infinite; transition: opacity .32s steps(4, jump-none); }
+    --g: var(--static-grain, 2px); --tile: calc(var(--g) * 80);
+    -webkit-mask-image: var(--static); mask-image: var(--static); -webkit-mask-repeat: repeat; mask-repeat: repeat;
+    -webkit-mask-size: var(--tile) var(--tile); mask-size: var(--tile) var(--tile); -webkit-mask-position: 0 0; mask-position: 0 0;
+    animation: trk-static .5s step-end infinite; transition: opacity .32s steps(4, jump-none); }
   .frame.s-static .noise { display: block; }
   .frame.s-static:not(.active) .snap, .frame.s-static.warmlive:not(.active) .zoomer { filter: grayscale(1) contrast(1.25) brightness(1.05); mix-blend-mode: screen; opacity: .85; }
   /* (following: the static drops out in steps, as a signal locking; standing by again it floods back the same way) */
@@ -504,7 +507,19 @@ const STYLE = `
   .frame.s-static .scan { background: radial-gradient(ellipse at center, rgba(0,0,0,0) 35%, rgba(0,0,0,.5) 100%); }
   .frame.s-static .sweep, .frame.s-static .rings, .frame.s-static .line, .frame.s-static .grid { display: none; }
   .frame.paused .noise, .frame.active:not(.lock) .noise { animation-play-state: paused; }
-  @keyframes trk-static { from { -webkit-mask-position: 0 0; mask-position: 0 0; } to { -webkit-mask-position: 100% 0; mask-position: 100% 0; } }
+  /* (the whole pattern jumps to another place, by whole specks, twenty times a second: it never looks the same twice running) */
+  @keyframes trk-static {
+    0% { -webkit-mask-position: 0 0; mask-position: 0 0; }
+    10% { -webkit-mask-position: calc(var(--g) * 37) calc(var(--g) * 11); mask-position: calc(var(--g) * 37) calc(var(--g) * 11); }
+    20% { -webkit-mask-position: calc(var(--g) * 9) calc(var(--g) * 53); mask-position: calc(var(--g) * 9) calc(var(--g) * 53); }
+    30% { -webkit-mask-position: calc(var(--g) * 61) calc(var(--g) * 29); mask-position: calc(var(--g) * 61) calc(var(--g) * 29); }
+    40% { -webkit-mask-position: calc(var(--g) * 23) calc(var(--g) * 71); mask-position: calc(var(--g) * 23) calc(var(--g) * 71); }
+    50% { -webkit-mask-position: calc(var(--g) * 47) calc(var(--g) * 5); mask-position: calc(var(--g) * 47) calc(var(--g) * 5); }
+    60% { -webkit-mask-position: calc(var(--g) * 3) calc(var(--g) * 41); mask-position: calc(var(--g) * 3) calc(var(--g) * 41); }
+    70% { -webkit-mask-position: calc(var(--g) * 67) calc(var(--g) * 59); mask-position: calc(var(--g) * 67) calc(var(--g) * 59); }
+    80% { -webkit-mask-position: calc(var(--g) * 31) calc(var(--g) * 19); mask-position: calc(var(--g) * 31) calc(var(--g) * 19); }
+    90% { -webkit-mask-position: calc(var(--g) * 13) calc(var(--g) * 67); mask-position: calc(var(--g) * 13) calc(var(--g) * 67); }
+  }
   @media (prefers-reduced-motion: reduce) { .noise { animation: none !important; transition: none !important; } }
   /* which parts each style has */
   .frame.s-radar .line { display: none; }
@@ -1050,7 +1065,12 @@ class ProtectTrackingCard extends HTMLElement {
     frame.classList.add(`s-${STANDBY.includes(this._config.standby) ? this._config.standby : "radar"}`);
     frame.classList.add(`bs-${this._boxStyle()}`);
     // (the static's texture is only made, and only handed to the card, when that look is picked)
-    if (this._config.standby === "static") frame.style.setProperty("--static", staticTexture());
+    if (this._config.standby === "static") {
+      frame.style.setProperty("--static", staticTexture());
+      // (the size of a speck, in px: the same on every size of card)
+      const grain = Number(this._config.static_grain);
+      frame.style.setProperty("--static-grain", `${grain >= 1 && grain <= 8 ? grain : STATIC_GRAIN}px`);
+    }
     this._phase = "standby";
     if (typeof this._config.accent === "string" && this._config.accent) frame.style.setProperty("--tracking-accent", this._config.accent);
     frame.addEventListener("click", () => this._open());
@@ -1816,12 +1836,13 @@ class ProtectTrackingCard extends HTMLElement {
 // a sound on every click on it, the one already picked included.
 
 // What the card does where the config says nothing (as setConfig has it).
-const EDIT_DEFAULTS = { face_pip: "auto", box_style: "reticle", types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, split: "off", sound: "none", sound_volume: 0.5 };
+const EDIT_DEFAULTS = { static_grain: 2, face_pip: "auto", box_style: "reticle", types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, split: "off", sound: "none", sound_volume: 0.5 };
 const EDIT_FORM = [
   { name: "camera", selector: { entity: { domain: "camera", integration: "unifiprotect" } } },
   { name: "name", selector: { text: {} } },
   { name: "types", selector: { select: { multiple: true, options: Object.entries(KINDS).map(([value, [label]]) => ({ value, label })) } } },
   { name: "standby", selector: { select: { options: STANDBY.map((value) => ({ value, label: value === "static" ? "Static (the picture glowing through: the live one with the live-picture switch below, else the still)" : value.charAt(0).toUpperCase() + value.slice(1) })) } } },
+  { name: "static_grain", selector: { number: { min: 1, max: 8, step: 1, mode: "slider", unit_of_measurement: "px" } } },
   { name: "linger", selector: { number: { min: 1, max: 120, mode: "box", unit_of_measurement: "s" } } },
   { name: "show_others", selector: { boolean: {} } },
   { name: "warm", selector: { boolean: {} } },
@@ -1832,7 +1853,7 @@ const EDIT_FORM = [
 ];
 const EDIT_LABELS = { camera: "Camera (empty: every camera that recognises things)", name: "Name (empty: the camera's)", types: "Watch for", standby: "Standing-by look",
   linger: "Stay after last seen", show_others: "Also box other things", warm: "Live picture while standing by (keeps the stream running)", height: "Height, e.g. 300px (empty: by shape)",
-  split: "Several things moving at once", box_style: "How the followed thing is marked", face_pip: "Face inset (the face enlarged in a corner)" };
+  split: "Several things moving at once", static_grain: "Static: size of a speck", box_style: "How the followed thing is marked", face_pip: "Face inset (the face enlarged in a corner)" };
 const EDIT_STYLE = `
   :host { display: block; }
   .sound { margin-top: 20px; }
