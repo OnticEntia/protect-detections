@@ -925,7 +925,7 @@ class ProtectTrackingCard extends HTMLElement {
     const root = this._root;
     const lt = a.sub.lt;
     const now = Date.now();
-    const behind = lt.behind(a.stream, { delay: cfg.live_delay, offset: cfg.live_offset });
+    const behind = lt.behind(a.stream, { delay: cfg.live_delay, offset: cfg.live_offset, debug: !!cfg.live_debug });
     const all = lt.visible(lt.moment(behind), true);
     const mine = all.filter((n) => cfg.types.includes(n.t.type)); // (standing still counts too)
     const others = cfg.show_others ? all.filter((n) => !cfg.types.includes(n.t.type) && lt.moment(behind) - n.t.moved <= 5000) : [];

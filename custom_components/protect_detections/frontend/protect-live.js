@@ -39,6 +39,12 @@ const LIVE_STAMP_MS = [180, 310]; // a frame's timestamp is this far ahead of th
 const LIVE_WEBRTC_BASE_MS = [300, 420]; // a position's moment to its frame on screen, without any held-back time
 const LIVE_AHEAD_MS = 300; // positions not here yet: a thing keeps moving as it did for this long, at most
 const RTP_WRAP_MS = 2 ** 32 / 90; // a video RTP timestamp (90 kHz) starts over after this
+// Checking the timing against the picture itself (live_debug): which "a
+// frame's timestamp is this far ahead" makes the boxes cover what moves.
+const FIT_W = 160;
+const FIT_H = 90;
+const FIT_STEPS = Array.from({ length: 41 }, (_, i) => -400 + i * 25); // ms tried
+const FIT_WAIT_MS = 1500; // a frame is judged this long after it was shown, when the positions round it are in
 const LIVE_HLS_EXTRA_MS = 1500; // what an HLS picture is behind beyond what its player reports (an estimate)
 const LIVE_KEEP_MS = 30000; // how long positions are kept (an HLS picture is seconds behind)
 const LIVE_HOLD_MS = 600; // a thing stays this long past its last report
@@ -92,6 +98,8 @@ export class LiveTracks {
     this.sync = "estimate"; // or "rtp": how the moment on screen was found
     this.lag = null; // (rtp) the frame on screen is this far behind the newest positions
     this.channel = 1;
+    this.debug = false; // (live_debug) also check the timing against the picture
+    this.fit = null; // {sum: per step, n, queue: frames waiting to be judged}
   }
 
   message(msg) {
@@ -179,6 +187,11 @@ export class LiveTracks {
         // (when it is shown, on our clock: the callback comes a little before)
         const wait = Number.isFinite(meta.expectedDisplayTime) && typeof performance !== "undefined" ? Math.max(0, Math.min(100, meta.expectedDisplayTime - performance.now())) : 0;
         this.frame = { rtp: meta.rtpTimestamp, at: Date.now() + wait };
+        if (this.debug) {
+          try {
+            this._fitLook(video);
+          } catch (e) {}
+        }
       } else this.frame = null;
       video.requestVideoFrameCallback(step);
     };
@@ -188,6 +201,12 @@ export class LiveTracks {
   // The camera's moment of the frame on screen, from that frame's own
   // timestamp; null where that can't be told (or doesn't add up).
   exact() {
+    const wall = this.frameWall();
+    return wall == null ? null : wall - (LIVE_STAMP_MS[this.channel] ?? LIVE_STAMP_MS[1]);
+  }
+
+  // The timestamp of the frame on screen, as the camera's wall clock.
+  frameWall() {
     const f = this.frame;
     const c = this.clock;
     const now = Date.now();
@@ -202,14 +221,87 @@ export class LiveTracks {
     const lag = about - stream;
     if (lag < -1500 || lag > 8000) return null;
     this.lag = lag;
-    return stream + (c.wall - c.stream) - (LIVE_STAMP_MS[this.channel] ?? LIVE_STAMP_MS[1]);
+    return stream + (c.wall - c.stream);
+  }
+
+  // ---- live_debug: the timing checked against the picture.
+  // Each frame is made small, and what changed since the frame before is
+  // noted (that is where things move). A little later, when the positions
+  // round that frame's time are in, each candidate timing is scored by how
+  // much of that movement lies inside the boxes it would have drawn. Over a
+  // minute or so of traffic the right one stands out.
+  _fitLook(video) {
+    const wall = this.frameWall();
+    if (wall == null || typeof document === "undefined") return;
+    const cv = (this._fitCanvas = this._fitCanvas || Object.assign(document.createElement("canvas"), { width: FIT_W, height: FIT_H }));
+    const g = cv.getContext("2d", { willReadFrequently: true });
+    g.drawImage(video, 0, 0, FIT_W, FIT_H);
+    const px = g.getImageData(0, 0, FIT_W, FIT_H).data;
+    const gray = new Uint8Array(FIT_W * FIT_H);
+    for (let i = 0; i < gray.length; i++) gray[i] = px[i * 4 + 1];
+    const prev = this._fitPrev;
+    this._fitPrev = gray;
+    if (!prev) return;
+    const mask = new Uint8Array(gray.length);
+    for (let i = 0; i < gray.length; i++) mask[i] = Math.abs(gray[i] - prev[i]) > 18 ? 1 : 0;
+    this.fitFrame(wall, mask);
+  }
+
+  // One frame for the check: its timestamp (camera's wall clock) and where
+  // the picture changed (FIT_W x FIT_H, 1 = changed).
+  fitFrame(wall, mask) {
+    const fit = (this.fit = this.fit || { sum: FIT_STEPS.map(() => 0), n: 0, queue: [] });
+    fit.queue.push({ wall, mask });
+    while (fit.queue.length && fit.queue[0].wall < wall - FIT_WAIT_MS) this._fitJudge(fit.queue.shift());
+    if (fit.queue.length > 200) fit.queue.shift();
+  }
+
+  _fitJudge({ wall, mask }) {
+    const fit = this.fit;
+    const scores = FIT_STEPS.map(() => 0);
+    let used = 0;
+    for (const t of this.tracks.values()) {
+      const pts = t.pts;
+      // only things on the move then, with positions on both sides of every time tried
+      if (pts.length < 3 || pts[0][0] > wall - 500 || pts[pts.length - 1][0] < wall + 500) continue;
+      const a = LiveTracks.at(t, wall - 300);
+      const b = LiveTracks.at(t, wall + 300);
+      if (!a || !b || Math.abs(a[0] + a[2] / 2 - (b[0] + b[2] / 2)) + Math.abs(a[1] + a[3] / 2 - (b[1] + b[3] / 2)) < 12) continue;
+      used++;
+      FIT_STEPS.forEach((step, k) => {
+        const box = LiveTracks.at(t, wall - step);
+        if (!box) return;
+        const x0 = Math.max(0, Math.floor((box[0] / 1000) * FIT_W));
+        const x1 = Math.min(FIT_W, Math.ceil(((box[0] + box[2]) / 1000) * FIT_W));
+        const y0 = Math.max(0, Math.floor((box[1] / 1000) * FIT_H));
+        const y1 = Math.min(FIT_H, Math.ceil(((box[1] + box[3]) / 1000) * FIT_H));
+        if (x1 <= x0 || y1 <= y0) return;
+        let hit = 0;
+        for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) hit += mask[y * FIT_W + x];
+        scores[k] += hit / ((x1 - x0) * (y1 - y0));
+      });
+    }
+    if (!used) return;
+    fit.n++;
+    scores.forEach((v, k) => (fit.sum[k] += v / used));
+  }
+
+  // What the check says so far: {best (ms), from, to (as good within 5 %), n frames}.
+  fitResult() {
+    const fit = this.fit;
+    if (!fit || !fit.n) return null;
+    const top = Math.max(...fit.sum);
+    if (!(top > 0)) return null;
+    const good = FIT_STEPS.filter((_, k) => fit.sum[k] >= top * 0.95);
+    return { best: FIT_STEPS[fit.sum.indexOf(top)], from: good[0], to: good[good.length - 1], n: fit.n };
   }
 
   // How far behind the camera the stream's picture on screen is (ms), as
   // well as can be told, seeing to it that it is held back as wanted.
   // delay: ms to hold back (default 700); offset: ms to add to the answer;
   // talking: true while the user talks through the camera (no holding back).
-  behind(stream, { delay, offset, talking } = {}) {
+  behind(stream, { delay, offset, talking, debug } = {}) {
+    this.debug = !!debug;
     const want = talking ? 0 : Math.max(0, Math.min(3000, Number.isFinite(delay) ? delay : LIVE_DELAY_MS));
     const now = Date.now();
     if (now - this.statsAt > 1000) {
@@ -262,6 +354,8 @@ export class LiveTracks {
       `picture ${n(behind)} ms behind`,
       this.kind === "webrtc" ? `held ${n(this.jb)} ms${this.can ? "" : " (can't hold)"}` : this.kind === "hls" ? `player says ${n(this.hls)} ms` : "",
       this.sync === "rtp" ? `frame ${n(this.lag)} ms older than newest positions` : this.frame ? "frame timestamps don't add up" : "no frame timestamps",
+      this.sync === "rtp" ? `stamp ${LIVE_STAMP_MS[this.channel] ?? LIVE_STAMP_MS[1]} ms` : "",
+      ((r) => (r ? `picture check: fits at ${r.best} ms (${r.from} to ${r.to}; ${r.n} frames)` : this.debug && this.sync === "rtp" ? "picture check: waiting for something to move" : ""))(this.fitResult()),
     ].filter(Boolean).join(" · ");
   }
 

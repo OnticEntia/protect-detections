@@ -2844,7 +2844,7 @@ class CameraWallCard extends HTMLElement {
   // it that the picture is held back as wanted (not while talking).
   _ltBehind(lt) {
     const cfg = this._config;
-    return lt.behind(this._liveStream, { delay: cfg.live_delay, offset: cfg.live_offset, talking: !!this._talk });
+    return lt.behind(this._liveStream, { delay: cfg.live_delay, offset: cfg.live_offset, talking: !!this._talk, debug: !!cfg.live_debug });
   }
 
   // One screen frame: the boxes where they belong now.
