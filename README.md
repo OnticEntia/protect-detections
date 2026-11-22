@@ -66,6 +66,8 @@ Best in a view of type *Panel*. With no options it shows one feed per UniFi Prot
 - **Arrange** (the button beside History): drag feeds to any cell of a grid, resize them, add or remove rows and columns. On a phone the wall is a list and arranging changes its order.
 - **Right-click** (press and hold on a touch screen) for a menu: resize a tile, take it off the wall or put it back, add or remove a camera's tracking tile.
 - The arrangement is saved for each Home Assistant user and follows them to every device.
+- **Editing from the wall** (administrators): the right-click menu has *Edit the wall…*, which opens Home Assistant's card editor on the wall itself and saves into the dashboard, and on a tracking tile *Edit this tracker…*, which opens the tracking card's editor (what it watches for, sound, standby look, source and so on) for that tile. A tile's settings are kept with your own arrangement, not in the dashboard; only what differs from the wall's `tracking:` options is stored. A dashboard kept in YAML is edited in its file.
+- The wall has a visual editor for its options. The camera lists, `alarm: false`, `alarm_modes`, `breakpoints` and options under `tracking:` stay YAML.
 
 | Option | Default | What it does |
 |---|---|---|

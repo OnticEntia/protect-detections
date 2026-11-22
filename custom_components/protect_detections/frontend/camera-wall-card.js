@@ -153,6 +153,7 @@ const ARRANGE_LOCAL_KEY = "camera-wall-card:arrange:";
 const GRID_MAX = 8; // columns or rows of an arranged wall, at most
 const ZONES_KEY = "camera-wall-card:zones";
 // live boxes (needs the Protect Detections backend's live relay)
+const EDIT_DIALOG = "hui-dialog-edit-card"; // Home Assistant's own dialog for editing a card
 const LIVE_BOXES_KEY = "camera-wall-card:live-boxes";
 const LIVE_SOURCE_KEY = "camera-wall-card:live-source"; // whose boxes, as picked in the live view
 const LIVE_TRACKER_KEY = "camera-wall-card:live-tracker"; // Protect Tracker has been seen from this browser
@@ -2571,6 +2572,158 @@ class CameraWallCard extends HTMLElement {
     });
   }
 
+  // ------------------------------------------------------------- editing
+  //
+  // "Edit the wall…" and "Edit this tracker…" open Home Assistant's own
+  // edit-card dialog (the card's editor or YAML, with the preview). The wall
+  // is a card of the dashboard: what the dialog saves is written into the
+  // dashboard, at the wall's place. A tracking tile is not: its options are
+  // the user's own, kept with the arrangement. It is shown to the dialog as
+  // the tracking card it is, and what is saved goes to where the tile's
+  // options are kept. The dialog is asked for as the frontend asks for it
+  // (a `show-dialog` event naming it): none of that is a public API, so
+  // when it can't be had the wall says so, and nothing is half done.
+  // For administrators only, as editing a dashboard is.
+
+  _mayEdit() {
+    const user = this._hass && this._hass.user;
+    return !!(user && user.is_admin);
+  }
+
+  _say(message) {
+    this.dispatchEvent(new CustomEvent("hass-notification", { bubbles: true, composed: true, detail: { message } }));
+  }
+
+  // Home Assistant's own handle on the dashboard, when it can be found from here.
+  _lovelace() {
+    for (let n = this; n; n = n.parentNode || n.host) {
+      const ll = n.lovelace;
+      if (ll && ll.config && typeof ll.saveConfig === "function") return ll;
+    }
+    return null;
+  }
+
+  // The dashboard's config and how to save it: {conf, save, yaml}; null when it can't be read.
+  async _dashboard() {
+    const ll = this._lovelace();
+    if (ll) return { conf: JSON.parse(JSON.stringify(ll.config)), save: (c) => ll.saveConfig(c), yaml: ll.mode === "yaml" };
+    try {
+      const first = location.pathname.split("/")[1] || "";
+      const url_path = !first || first === "lovelace" ? null : first;
+      const conf = await this._hass.callWS({ type: "lovelace/config", url_path, force: false });
+      const save = async (c) => {
+        await this._hass.callWS({ type: "lovelace/config/save", url_path, config: c });
+        this.dispatchEvent(new CustomEvent("config-refresh", { bubbles: true, composed: true }));
+      };
+      return { conf, save, yaml: false };
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // The frontend's own way of loading the dialog (it is not loaded until a
+  // card is first edited). The view answers `ll-edit-card` by asking for the
+  // dialog with it: that request is caught here before it is shown, and only
+  // the loader is kept. Null when it cannot be had.
+  _dialogImport(conf) {
+    if (customElements.get(EDIT_DIALOG)) return () => Promise.resolve();
+    let path = null;
+    ((conf && conf.views) || []).some((v, i) => {
+      if (!v || typeof v !== "object") return false;
+      if (Array.isArray(v.cards) && v.cards.length) path = [i, 0];
+      else (Array.isArray(v.sections) ? v.sections : []).some((sec, j) => (sec && Array.isArray(sec.cards) && sec.cards.length ? !!(path = [i, j, 0]) : false));
+      return !!path;
+    });
+    if (!path) return null;
+    let load = null;
+    const grab = (ev) => {
+      const d = ev.detail || {};
+      if (d.dialogTag !== EDIT_DIALOG) return;
+      ev.stopPropagation();
+      if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
+      load = d.dialogImport;
+    };
+    window.addEventListener("show-dialog", grab, true);
+    try {
+      this.dispatchEvent(new CustomEvent("ll-edit-card", { bubbles: true, composed: true, detail: { path } }));
+    } finally {
+      window.removeEventListener("show-dialog", grab, true);
+    }
+    return typeof load === "function" ? load : null;
+  }
+
+  // Opens Home Assistant's dialog on a card config; `save(next)` is called with what it saves.
+  _openEditor(dash, cardConfig, save) {
+    const load = this._dialogImport(dash.conf);
+    if (!load) {
+      this._say("Home Assistant's card editor could not be opened from here. Use Edit dashboard instead.");
+      return false;
+    }
+    const saveCardConfig = async (next) => {
+      if (!next || typeof next !== "object" || Array.isArray(next) || !next.type) throw new Error("A card needs a type.");
+      await save(next);
+    };
+    this.dispatchEvent(new CustomEvent("show-dialog", { bubbles: true, composed: true, detail: { dialogTag: EDIT_DIALOG, dialogImport: load, dialogParams: { lovelaceConfig: dash.conf, cardConfig, saveCardConfig } } }));
+    return true;
+  }
+
+  // The wall's own config, in the dashboard.
+  async _editWall() {
+    if (!this._mayEdit()) return false;
+    const mine = this._configJson;
+    const dash = await this._dashboard();
+    if (!dash || !mine) return this._say("This dashboard cannot be read from here: edit the wall with Edit dashboard."), false;
+    if (dash.yaml) return this._say("This dashboard is kept in YAML: edit the wall there."), false;
+    const find = (conf) => {
+      let found = null;
+      const walk = (node, set) => {
+        if (found || !node || typeof node !== "object") return;
+        if (Array.isArray(node)) return node.forEach((v, i) => walk(v, (nv) => (node[i] = nv)));
+        if (node.type === "custom:camera-wall-card" && set && JSON.stringify(node) === mine) return void (found = set);
+        for (const k of Object.keys(node)) walk(node[k], (nv) => (node[k] = nv));
+      };
+      walk(conf && conf.views, null);
+      return found;
+    };
+    if (!find(dash.conf)) return this._say("The wall could not be found in the dashboard (it may have changed): reload the page and try again."), false;
+    return this._openEditor(dash, JSON.parse(mine), async (next) => {
+      // (read afresh: the dashboard may have been changed meanwhile)
+      const now = await this._dashboard();
+      const set = now && find(now.conf);
+      if (!set) throw new Error("The wall could not be saved: the dashboard has changed. Reload the page and try again.");
+      set(next);
+      await now.save(now.conf);
+    });
+  }
+
+  // A tracking tile's options, as the tracking card they are for.
+  async _editTracker(key) {
+    if (!this._mayEdit()) return false;
+    const x = (this._xTiles || []).find((t) => t.key === key);
+    if (!x) return false;
+    const dash = await this._dashboard();
+    if (!dash) return this._say("Home Assistant's card editor could not be opened from here."), false;
+    const { embedded, ...card } = this._trackConfig(x);
+    return this._openEditor(dash, card, async (next) => {
+      if (next.type !== x.base.type) throw new Error("This tile is a tracking card: its type can't be changed here.");
+      this._arrChange((a) => {
+        a.opts = { ...(a.opts || {}), [key]: CameraWallCard.tileOptions(x.base, next) };
+      });
+    });
+  }
+
+  // What of an edited tracking card is the tile's own: all that differs from
+  // what the wall gives every tile (its `tracking:` options). The camera and
+  // the kind of card are the tile's and stay.
+  static tileOptions(base, next) {
+    const own = {};
+    for (const [k, v] of Object.entries(next || {})) {
+      if (["type", "camera", "embedded"].includes(k) || v === undefined) continue;
+      if (JSON.stringify(v) !== JSON.stringify(base[k])) own[k] = v;
+    }
+    return own;
+  }
+
   // A tile's own options (a tracking tile's: what it watches for, its stream).
   _setOpts(key, patch) {
     this._arrChange((a) => {
@@ -2691,7 +2844,9 @@ class CameraWallCard extends HTMLElement {
     const wide = this._bpCols() > 1;
     const anyOff = els.some((e) => !e.shown);
     const cams = this._config.cameras;
+    const admin = this._mayEdit();
     const layout = (kit) => [
+      ...(admin ? [kit.item("Edit the wall…", () => this._editWall())] : []),
       kit.item("Arrange…", () => this._arrEnter()),
       // (everything back: places, sizes, what was taken off, the tiles' own options)
       kit.item("Reset layout", () =>
@@ -2742,6 +2897,7 @@ class CameraWallCard extends HTMLElement {
         return [
           kit.head(cams[el.cam].name || cams[el.cam].entity, "Tracking tile"),
           kit.item("Open camera", () => this._openLive(el.cam)),
+          ...(admin ? [kit.item("Edit this tracker…", () => this._editTracker(el.key))] : []),
           ...sizes(kit),
           kit.hr(),
           ...watch,
@@ -4033,6 +4189,122 @@ class CameraWallCard extends HTMLElement {
 }
 
 // (defined once, however the file got here)
+// ---------------------------------------------------------------- editor
+//
+// The wall's editor: its options as a form. A field the config leaves out
+// shows what the wall does by default, and stays left out until it is
+// changed. The camera lists (`cameras`, a `history` list), `alarm_modes`,
+// `breakpoints` and a tracking tile's options (`tracking: {...}`) are YAML.
+const WALL_DEFAULTS = { history: true, tracking: true, arrange: true, aspect_ratio: 1.7778, live_tracks: true, source: "auto", live_delay: 700, live_offset: 0, live_debug: false, zone_overlay: true, phone_landscape: true };
+const WALL_SWITCH_OR_MORE = ["history", "tracking"]; // false, or left out, or more said in YAML
+const WALL_FORM = [
+  { name: "exclude", selector: { text: { multiple: true } } },
+  { name: "order", selector: { text: { multiple: true } } },
+  { name: "alarm", selector: { entity: { domain: "alarm_control_panel" } } },
+  { name: "history", selector: { boolean: {} } },
+  { name: "tracking", selector: { boolean: {} } },
+  { name: "arrange", selector: { boolean: {} } },
+  { name: "layout", selector: { text: {} } },
+  { name: "aspect_ratio", selector: { number: { min: 0.5, max: 3, step: 0.0001, mode: "box" } } },
+  { name: "live_tracks", selector: { boolean: {} } },
+  { name: "source", selector: { select: { options: [{ value: "auto", label: "Auto: Protect Tracker's when installed, else UniFi Protect's" }, { value: "local", label: "Local: only Protect Tracker's own" }, { value: "protect", label: "UniFi: only UniFi Protect's own" }] } } },
+  { name: "live_delay", selector: { number: { min: 0, max: 3000, step: 50, mode: "box", unit_of_measurement: "ms" } } },
+  { name: "live_offset", selector: { number: { min: -3000, max: 3000, step: 10, mode: "box", unit_of_measurement: "ms" } } },
+  { name: "live_debug", selector: { boolean: {} } },
+  { name: "zone_overlay", selector: { boolean: {} } },
+  { name: "phone_landscape", selector: { boolean: {} } },
+  { name: "local_url", selector: { text: {} } },
+  { name: "remote_url", selector: { text: {} } },
+];
+const WALL_LABELS = { exclude: "Cameras to leave out (names, entity ids or device ids)", order: "Cameras to put first, in this order", alarm: "Alarm panel (empty: the one that is found)",
+  history: "History button", tracking: "Tracking tiles", arrange: "Arrange button", layout: "Name of this wall's saved arrangement (empty: default)", aspect_ratio: "Shape of each feed (width / height)",
+  live_tracks: "Boxes button in the live view", source: "Whose boxes", live_delay: "Live picture held back for the boxes", live_offset: "Draw the boxes later (+) or earlier (−)",
+  live_debug: "Write on the live picture how the boxes are timed", zone_overlay: "Zones in the live view", phone_landscape: "Turn the live view on a phone", local_url: "Local address (empty: Home Assistant's)", remote_url: "Remote address (empty: Home Assistant's)" };
+
+class CameraWallCardEditor extends HTMLElement {
+  setConfig(config) {
+    this._config = { ...(config || {}) };
+    this._show();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._form) this._form.hass = hass;
+  }
+
+  connectedCallback() {
+    this._show();
+  }
+
+  // What each field shows: the config's value, or what the wall does without one.
+  _values() {
+    const cfg = this._config || {};
+    const out = {};
+    for (const { name } of WALL_FORM) {
+      if (WALL_SWITCH_OR_MORE.includes(name)) out[name] = cfg[name] !== false;
+      else if (cfg[name] != null && cfg[name] !== "" && cfg[name] !== false) out[name] = cfg[name];
+      else if (name in WALL_DEFAULTS) out[name] = cfg[name] === false ? false : WALL_DEFAULTS[name];
+    }
+    return out;
+  }
+
+  _show() {
+    if (!this._config) return;
+    if (!this._form) {
+      const root = this.attachShadow({ mode: "open" });
+      const form = (this._form = document.createElement("ha-form"));
+      form.schema = WALL_FORM;
+      form.computeLabel = (field) => WALL_LABELS[field.name] || field.name;
+      form.addEventListener("value-changed", (ev) => {
+        ev.stopPropagation();
+        this._changed((ev.detail && ev.detail.value) || {});
+      });
+      const note = document.createElement("p");
+      note.style.cssText = "margin:16px 0 0;font-size:13px;color:var(--secondary-text-color)";
+      note.textContent = "The camera lists (cameras, a history list), alarm: false, alarm_modes, breakpoints and options for the tracking tiles are set in YAML (Show code editor). What each viewer arranges on the wall is kept for that viewer, not here.";
+      root.append(form, note);
+      // (Home Assistant loads its form element only where one is used: ask for it)
+      if (!customElements.get("ha-form") && window.loadCardHelpers) {
+        Promise.resolve(window.loadCardHelpers())
+          .then((h) => h.createCardElement({ type: "entities", entities: [] }))
+          .then(() => customElements.whenDefined("hui-entities-card"))
+          .then(() => customElements.get("hui-entities-card").getConfigElement())
+          .catch(() => {});
+      }
+    }
+    this._form.hass = this._hass;
+    this._form.data = this._values();
+  }
+
+  // One left out of the config stays out while it shows its default; an emptied one is taken out.
+  _changed(data) {
+    const config = { ...this._config };
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    for (const { name } of WALL_FORM) {
+      const v = data[name];
+      if (WALL_SWITCH_OR_MORE.includes(name)) {
+        // off: false. On: as it was (a list or options said in YAML are kept), or left out
+        if (v === false) config[name] = false;
+        else if (this._config[name] === false) delete config[name];
+        continue;
+      }
+      const empty = v == null || v === "" || (Array.isArray(v) && !v.length);
+      if (empty) {
+        // (a `false` said in YAML, such as alarm: false, has no field here and is left as it is)
+        if (this._config[name] !== false) delete config[name];
+      } else if (!(name in this._config) && name in WALL_DEFAULTS && same(v, WALL_DEFAULTS[name])) continue;
+      else config[name] = v;
+    }
+    if (same(config, this._config)) return;
+    this._config = config;
+    this._show();
+    this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
+  }
+}
+if (!customElements.get("camera-wall-card-editor")) customElements.define("camera-wall-card-editor", CameraWallCardEditor);
+CameraWallCard.getConfigElement = () => document.createElement("camera-wall-card-editor");
+CameraWallCard.editDefaults = WALL_DEFAULTS;
+
 if (!customElements.get("camera-wall-card")) customElements.define("camera-wall-card", CameraWallCard);
 
 window.customCards = window.customCards || [];

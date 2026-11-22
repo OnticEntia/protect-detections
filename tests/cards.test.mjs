@@ -1171,8 +1171,9 @@ ok(w._built && !w._building, "next good config builds after a failure");
   // --- kerbside parking: a car drives past a parked car of the same kind
   const suv = { id: "suv", coord: [450, 140, 110, 70], objectType: "vehicle", stationary: true, desc: "gray suv" };
   const pass = (t0) => (t) => 100 + (t - t0) * 0.25; // the passing car's left edge: crosses the SUV's place about 1.4 s in
+  // (time on the parked car is counted from when the passing car itself, and the view following it, are clear of its place)
   const track = async (cfg, during, after, note) => { const c2 = await mkc({ types: ["vehicle"], ...cfg }); c2.run(4000, () => [suv]); const t0 = c2.T; const x = pass(t0);
-    const seen = new Set(); let onSuv = 0; const step = (ms, f) => { for (let end = c2.T + ms; c2.T < end; ) { c2.run(100, f); if (c2._active) { seen.add(String(c2._active.subject)); const [cx, k] = c2.centre(); if (k > 1.5 && Math.abs(cx - 505) < 45 && c2.T - t0 > 2300) onSuv++; // (counted from when the passing car itself, and the view following it, are clear of the parked car's place) } } };
+    const seen = new Set(); let onSuv = 0; const step = (ms, f) => { for (let end = c2.T + ms; c2.T < end; ) { c2.run(100, f); if (c2._active) { seen.add(String(c2._active.subject)); const [cx, k] = c2.centre(); if (k > 1.5 && Math.abs(cx - 505) < 45 && c2.T - t0 > 2300) onSuv++; } } };
     step(3000, (t) => during(t, x, t0)); step(9000, (t) => after(t, x, t0)); return { c2, seen, onSuv, t0 }; };
   // 1. as it should come: two ids, the passer drives on and out
   let r = await track({}, (t, x) => [suv, car("pass", x(t))], (t, x) => (x(t) < 1000 ? [suv, car("pass", x(t))] : [suv]));
@@ -1209,6 +1210,77 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const zooms = new Set(); for (let n = 0; n < 30; n++) { c.run(100, (t) => [{ id: "w", coord: [400, 300, 60 + ((t / 100) % 2 ? 2 : -2), 180 + ((t / 100) % 2 ? 4 : -4)], objectType: "person", stationary: false }]); zooms.add(c._active.view.want[0]); }
   ok(zooms.size === 1, "a box whose size wobbles from packet to packet: the zoom aimed at stays the same");
   c.disconnectedCallback(); ctx.localStorage.store = {};
+}
+// --- editing from the wall's menu, and the wall's own editor
+{
+  ctx.localStorage.store = {};
+  const store = { value: null };
+  const wallCfg = { type: "custom:camera-wall-card", cameras: [{ entity: "camera.a", name: "A" }, { entity: "camera.b", name: "B" }], alarm: false, history: false, tracking: { types: ["person"], linger: 7 } };
+  const dashConf = () => ({ views: [{ title: "Home", cards: [{ type: "markdown", content: "x" }] }, { title: "Security", sections: [{ cards: [{ type: "tile", entity: "light.x" }, JSON.parse(JSON.stringify(wallCfg))] }] }] });
+  const mk = async ({ admin = true, mode = "storage", dialog = true } = {}) => { const w = new Wall(); w.clientWidth = 1000; w.isConnected = true; const saved = []; const shown = []; const said = [];
+    const ll = { config: dashConf(), mode, saveConfig: (c) => { saved.push(JSON.parse(JSON.stringify(c))); ll.config = c; return Promise.resolve(); } };
+    w.parentNode = { lovelace: ll }; w.ll = ll; w.saved = saved; w.shown = shown; w.said = said;
+    // the view: answers ll-edit-card as Home Assistant's does, by asking for the dialog (with its loader)
+    w.addEventListener("ll-edit-card", () => { if (dialog) win.dispatchEvent(new Ev("show-dialog", { detail: { dialogTag: "hui-dialog-edit-card", dialogImport: () => Promise.resolve("loaded"), dialogParams: {} }, stopPropagation() {}, stopImmediatePropagation() {} })); });
+    w.addEventListener("show-dialog", (ev) => shown.push(ev.detail)); w.addEventListener("hass-notification", (ev) => said.push(ev.detail.message));
+    w.setConfig(JSON.parse(JSON.stringify(wallCfg)));
+    w.hass = { ...hass, user: { is_admin: admin }, entities: {}, devices: {}, connection: { subscribeMessage: () => Promise.resolve(() => {}) },
+      callWS: (m) => { if (m.type === "network/url") return Promise.resolve({}); if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { "camera.a": "p1" } });
+        if (m.type === "frontend/get_user_data") return Promise.resolve({ value: store.value }); if (m.type === "frontend/set_user_data") { store.value = m.value; return Promise.resolve({}); } return new Promise(() => {}); } };
+    await tick(); await tick(); await tick(); return w; };
+  const menu = (w, i) => { w._wallContext(100, 100, i); return w._wMenu ? w._wMenu.menu.children.map((c) => c.textAll).filter(Boolean) : []; };
+  const pick = async (w, text) => { w._wMenu.menu.children.find((c) => c.textAll.startsWith(text)).onclick(); await tick(); await tick(); await tick(); };
+  // who sees it
+  let w = await mk({ admin: false });
+  ok(!menu(w, null).some((t) => /Edit the wall/.test(t)) && !menu(w, 2).some((t) => /Edit this tracker/.test(t)), "someone who can't edit the dashboard: no edit entries in the wall's menu"); w._wMenuClose(); w.disconnectedCallback();
+  w = await mk();
+  ok(menu(w, null).some((t) => /^Edit the wall…/.test(t)), "an administrator, on the wall itself: Edit the wall…");
+  // the wall: Home Assistant's dialog, on the wall's config as written
+  await pick(w, "Edit the wall…");
+  ok(w.shown.length === 1 && w.shown[0].dialogTag === "hui-dialog-edit-card" && typeof w.shown[0].dialogImport === "function" && JSON.stringify(w.shown[0].dialogParams.cardConfig) === JSON.stringify(wallCfg), "it opens Home Assistant's own card dialog, with the wall's config as it is written in the dashboard");
+  await w.shown[0].dialogParams.saveCardConfig({ ...wallCfg, source: "local", live_debug: true });
+  const after = w.saved[0];
+  ok(w.saved.length === 1 && after.views[1].sections[0].cards[1].source === "local" && after.views[1].sections[0].cards[1].live_debug === true && JSON.stringify(after.views[0]) === JSON.stringify(dashConf().views[0]) && JSON.stringify(after.views[1].sections[0].cards[0]) === JSON.stringify({ type: "tile", entity: "light.x" }), "what the dialog saves goes into the dashboard at the wall's place; nothing else there changes");
+  let threw = false; try { await w.shown[0].dialogParams.saveCardConfig({ source: "local" }); } catch (e) { threw = true; } ok(threw && w.saved.length === 1, "a config without a type is refused, nothing saved");
+  // saving again with the dashboard changed underneath: said, not guessed
+  w.ll.config = { views: [{ cards: [{ type: "markdown", content: "only this now" }] }] }; threw = false; try { await w.shown[0].dialogParams.saveCardConfig({ ...wallCfg, arrange: false }); } catch (e) { threw = /has changed/.test(e.message); }
+  ok(threw && w.saved.length === 1, "the wall no longer where it was in the dashboard: the save fails with a reason, nothing is written");
+  w.disconnectedCallback();
+  // a tracking tile: the tracking card's editor, saved to the user's own options
+  store.value = null; w = await mk();
+  ok(menu(w, 2).some((t) => /^Edit this tracker…/.test(t)) && !menu(w, 0).some((t) => /Edit this/.test(t)), "on a tracking tile: Edit this tracker… (a camera tile has no settings of its own beyond its size, so none there)");
+  menu(w, 2); await pick(w, "Edit this tracker…");
+  const card = w.shown[0].dialogParams.cardConfig;
+  ok(card.type === "custom:protect-tracking-card" && card.camera === "camera.a" && card.linger === 7 && card.types.join() === "person" && !("embedded" in card), "the dialog is given the tile as the tracking card it is: its camera and the options it has now");
+  await w.shown[0].dialogParams.saveCardConfig({ ...card, sound: "lock", sound_volume: 0.8, linger: 7, types: ["person", "vehicle"] }); await tick();
+  const opts = store.value.walls.default.opts["track:camera.a"] || Object.values(store.value.walls.default.opts)[0];
+  ok(w.saved.length === 0 && JSON.stringify(opts) === JSON.stringify({ types: ["person", "vehicle"], sound: "lock", sound_volume: 0.8 }), "saving writes only what differs from the wall's own tracking options, to this user's settings; the dashboard is not touched: " + JSON.stringify(opts));
+  const tcard = w._xTiles[0].card; ok(tcard._config.sound === "lock" && tcard._config.types.join() === "person,vehicle" && tcard._config.embedded === true && tcard._config.linger === 7, "and the tile takes it on at once");
+  threw = false; try { await w.shown[0].dialogParams.saveCardConfig({ type: "markdown", content: "x" }); } catch (e) { threw = true; } ok(threw, "another kind of card can't be put in the tile's place");
+  ok(JSON.stringify(Wall.tileOptions({ type: "t", camera: "c", linger: 7, embedded: true }, { type: "t", camera: "other", linger: 7, standby: "pulse" })) === JSON.stringify({ standby: "pulse" }), "(the camera and the kind of card are the tile's, and stay)");
+  w.disconnectedCallback();
+  // when it can't be done, it says so
+  w = await mk({ mode: "yaml" }); menu(w, null); await pick(w, "Edit the wall…"); ok(w.shown.length === 0 && /kept in YAML/.test(w.said.join()), "a dashboard kept in YAML: said, nothing opened"); w.disconnectedCallback();
+  w = await mk({ dialog: false }); menu(w, null); await pick(w, "Edit the wall…"); ok(w.shown.length === 0 && /could not be opened/.test(w.said.join()), "Home Assistant's dialog can't be had: said"); w.disconnectedCallback();
+
+  // --- the wall's own editor
+  const mke = (cfg) => { const e = Wall.getConfigElement(); const out = []; e.addEventListener("config-changed", (ev) => out.push(ev.detail.config)); e.hass = hass; e.setConfig(cfg); e.connectedCallback(); e.out = out; return e; };
+  const change = (e, patch) => e._form.dispatchEvent(new Ev("value-changed", { detail: { value: { ...e._form.data, ...patch } }, stopPropagation() {} }));
+  let e = mke({ type: "custom:camera-wall-card" }); const d = e._form.data;
+  ok(e instanceof defs["camera-wall-card-editor"] && d.history === true && d.tracking === true && d.arrange === true && d.live_tracks === true && d.source === "auto" && d.live_delay === 700 && d.live_offset === 0 && d.live_debug === false && d.zone_overlay === true && d.phone_landscape === true && Math.abs(d.aspect_ratio - 1.7778) < 1e-9, "the wall has an editor of its own, and what the config leaves out is shown as the wall does it");
+  ok(["source", "live_debug", "exclude", "order", "alarm", "layout", "local_url", "remote_url"].every((n) => e._form.schema.some((f) => f.name === n)) && e._form.computeLabel({ name: "source" }) === "Whose boxes", "its documented options are there, source and live_debug among them");
+  change(e, {}); ok(e.out.length === 0, "nothing changed: nothing written");
+  change(e, { source: "local" }); ok(e.out.length === 1 && JSON.stringify(e.out[0]) === JSON.stringify({ type: "custom:camera-wall-card", source: "local" }), "one option changed: only that one is written");
+  change(e, { exclude: ["Garage*"], live_debug: true }); ok(e.out[1].exclude.join() === "Garage*" && e.out[1].live_debug === true && !("live_delay" in e.out[1]), "more of them; the rest still left out");
+  change(e, { exclude: [] }); ok(!("exclude" in e.out[2]), "a list emptied: taken out");
+  change(e, { tracking: false }); ok(e.out[3].tracking === false, "tracking tiles switched off: tracking: false");
+  change(e, { tracking: true }); ok(!("tracking" in e.out[4]), "and on again: left out (the default)");
+  e = mke({ type: "custom:camera-wall-card", cameras: [{ entity: "camera.a" }], alarm: false, history: [{ entity: "camera.a" }], tracking: { types: ["person"] }, breakpoints: [[0, 2]] });
+  ok(e._form.data.history === true && e._form.data.tracking === true && !("alarm" in e._form.data), "a history list and tracking options said in YAML show as switched on");
+  change(e, { live_offset: 50 });
+  ok(e.out.length === 1 && e.out[0].alarm === false && Array.isArray(e.out[0].history) && e.out[0].tracking.types.join() === "person" && e.out[0].breakpoints[0].join() === "0,2" && e.out[0].cameras.length === 1 && e.out[0].live_offset === 50, "changing a field leaves what is only in YAML exactly as it was (alarm: false, the lists, tracking's options)");
+  change(e, { history: false }); ok(e.out[1].history === false, "switching History off replaces the list with false (said so by the switch)");
+  ctx.localStorage.store = {};
 }
 // --- the tracking card's "Last seen", from the integration's record
 {
