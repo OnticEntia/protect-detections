@@ -23,26 +23,28 @@
  *    what the browser holds (WebRTC, read from the connection), or what the
  *    player says it is behind (HLS, rough: expect to trim with live_offset).
  *
- * Measured against a camera's picture (the moving parts of the picture
- * against the boxes): the positions for a frame are stamped later than the
- * frame is, by about 180 ms on the camera's main stream and about 310 ms on
- * its second one, and a frame reaches Home Assistant about 75 ms after its
- * timestamp. The numbers below come from that. There is no error in place:
- * the boxes are right where the timing is.
+ * How far the positions' stamps are from the frames' is measured in the
+ * browser itself, against the picture (see _fitLook: what moves in each
+ * frame against the boxes): on a camera's main stream the positions for a
+ * frame are stamped about 125 ms after the frame is. There is no error in
+ * place: the boxes are right where the timing is. (Measuring the same from
+ * outside the browser, by when frames arrive, gave figures that were off by
+ * hundreds of ms: a stream first sends what it has in hand, and arrival
+ * times stay late for a long while after.)
  */
 
 export const LIVE_COLORS = { person: "#ff2d55", vehicle: "#4ea8ff", animal: "#34d399", package: "#fbbf24", licensePlate: "#c084fc", face: "#f472b6" };
 export const LIVE_DELAY_MS = 700; // how far the picture is held back so the positions can keep up with it
 const LIVE_TRANSIT_MS = 330; // the quickest a position gets here after its moment (measured)
 // By the camera's stream (0: main, others: the lighter ones), measured:
-const LIVE_STAMP_MS = [180, 310]; // a frame's timestamp is this far ahead of the clock its positions carry
-const LIVE_WEBRTC_BASE_MS = [300, 420]; // a position's moment to its frame on screen, without any held-back time
+const LIVE_STAMP_MS = [-125, -25]; // a frame's timestamp, against the clock its positions carry (minus: the positions' is later). Main stream: measured; the others: reckoned from it
+const LIVE_WEBRTC_BASE_MS = [0, 100]; // a position's moment to its frame on screen, without any held-back time (the same figures, said for the estimate)
 const LIVE_AHEAD_MS = 300; // positions not here yet: a thing keeps moving as it did for this long, at most
 const RTP_WRAP_MS = 2 ** 32 / 90; // a video RTP timestamp (90 kHz) starts over after this
 // Checking the timing against the picture itself (live_debug): which "a
 // frame's timestamp is this far ahead" makes the boxes cover what moves.
-const FIT_W = 160;
-const FIT_H = 90;
+const FIT_W = 320;
+const FIT_H = 180;
 const FIT_STEPS = Array.from({ length: 101 }, (_, i) => -1500 + i * 25); // ms tried: -1500 .. 1000
 const FIT_WAIT_MS = 2800; // a frame is judged this long after it was shown, when the positions round it are in
 const LIVE_HLS_EXTRA_MS = 1500; // what an HLS picture is behind beyond what its player reports (an estimate)
@@ -269,7 +271,7 @@ export class LiveTracks {
       if (pts.length < 3 || first > wall - 300 || last < wall + 300) continue;
       const a = LiveTracks.at(t, wall - 300);
       const b = LiveTracks.at(t, wall + 300);
-      if (!a || !b || Math.abs(a[0] + a[2] / 2 - (b[0] + b[2] / 2)) + Math.abs(a[1] + a[3] / 2 - (b[1] + b[3] / 2)) < 12) continue;
+      if (!a || !b || Math.abs(a[0] + a[2] / 2 - (b[0] + b[2] / 2)) + Math.abs(a[1] + a[3] / 2 - (b[1] + b[3] / 2)) < 6) continue;
       used++;
       FIT_STEPS.forEach((step, k) => {
         const when = wall - step;
