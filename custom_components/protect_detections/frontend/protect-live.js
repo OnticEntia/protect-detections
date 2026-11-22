@@ -88,12 +88,16 @@ const LIVE_RETRY_MS = 120000; // auto, without Protect Tracker: looked for again
  *   onState(state)   {using: "tracker" | "protect" | null, mode, error, code}
  *                    whenever what is listened to changes or fails; `mode`
  *                    is Protect Tracker's: "local" or "auto"
+ * `autoLocal`: with "auto", ask Protect Tracker for its local mode first (it
+ * tells of a thing as soon as its own model sees it, without waiting for
+ * Protect), and use its ordinary mode only while the local one isn't there
+ * (an older Protect Tracker, its engine not running or not connected).
  * Returns a function that stops it. With "auto", Protect Tracker is tried
  * first and Protect's own is used while it isn't there; it is looked for
  * again now and then, and when the connection to Home Assistant comes back
  * (installing it later needs no reload).
  */
-export function subscribeLive(hass, entity, source, onMessage, onState = () => {}) {
+export function subscribeLive(hass, entity, source, onMessage, onState = () => {}, { autoLocal = false } = {}) {
   const want = LIVE_SOURCES.includes(source) ? source : "auto";
   const conn = hass.connection;
   let stopped = false;
@@ -111,21 +115,45 @@ export function subscribeLive(hass, entity, source, onMessage, onState = () => {
   const listen = (which, mode) => {
     const sub = { which, mode: which === "tracker" ? mode || "auto" : null, unsub: null };
     const ask = { type: LIVE_TYPES[which], entity, ...(sub.mode === "local" ? { mode: "local" } : {}) };
-    return Promise.resolve(conn.subscribeMessage((msg) => !stopped && current === sub && onMessage(msg), ask)).then((unsub) => {
+    const hear = (msg) => {
+      if (stopped || current !== sub) return;
+      // (auto on the local mode, and its engine's connection goes: the ordinary mode meanwhile)
+      if (want === "auto" && sub.mode === "local" && msg && msg.status === "disconnected") return void ordinary();
+      onMessage(msg);
+    };
+    return Promise.resolve(conn.subscribeMessage(hear, ask)).then((unsub) => {
       sub.unsub = unsub;
       return sub;
     });
   };
-  // Protect Tracker, in the mode wanted: local where it has it
-  const tracker = () =>
-    want !== "local"
-      ? listen("tracker")
-      : listen("tracker", "local").catch((err) => {
-          // only one from before the local mode, which refuses the extra word, is asked the old way;
-          // anything else (not installed, its engine not running, not a camera of its) is what it is
-          if (stopped || !err || err.code !== "invalid_format") throw err;
-          return listen("tracker");
-        });
+  // auto, off the local mode for now: the ordinary one, and the local one is looked for again
+  const ordinary = () => {
+    again();
+    listen("tracker").then(
+      (sub) => use(sub),
+      () => {}
+    );
+  };
+  // Protect Tracker, in the mode wanted
+  const tracker = () => {
+    if (want === "local") {
+      return listen("tracker", "local").catch((err) => {
+        // only one from before the local mode, which refuses the extra word, is asked the old way;
+        // anything else (not installed, its engine not running, not a camera of its) is what it is
+        if (stopped || !err || err.code !== "invalid_format") throw err;
+        return listen("tracker");
+      });
+    }
+    if (want === "auto" && autoLocal) {
+      return listen("tracker", "local").catch((err) => {
+        if (stopped || !err || err.code === "unknown_command") throw err; // (not installed: Protect's own)
+        again(); // (no local mode yet, or its engine not running: looked for again)
+        if (current && current.which === "tracker") throw Object.assign(new Error("as it is"), { keep: true }); // its ordinary mode is running: it stays
+        return listen("tracker");
+      });
+    }
+    return listen("tracker");
+  };
   const use = (sub) => {
     if (stopped) return drop(sub);
     const old = current;
@@ -145,7 +173,7 @@ export function subscribeLive(hass, entity, source, onMessage, onState = () => {
       .then(
         (sub) => use(sub),
         (err) => {
-          if (stopped) return null;
+          if (stopped || (err && err.keep)) return null;
           if (want !== "auto") {
             // asked for by name and not there: said, and looked for again
             if (!current) onState({ using: null, error: err, code: err && err.code });

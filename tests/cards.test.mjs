@@ -1444,6 +1444,17 @@ ok(w._built && !w._building, "next good config builds after a failure");
   r = await run("down", "local"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "null/-:not_ready", "its engine not running (not_ready): said as that, and its mixed feed is not used in its place"); r.stop();
   r = await run("new", "auto"); ok(r.conn.asked.join() === "tracker" && r.states.join() === "tracker/auto", "source auto: its ordinary mode, no word added"); r.stop();
   r = await run("new", "protect"); ok(r.conn.asked.join() === "protect" && r.states.join() === "protect/-", "source protect: not asked at all"); r.stop();
+  // auto preferring the local mode (a switch, off by default)
+  const runL = async (kind) => { const conn = mkConn(kind); const states = []; const got = []; const stop = ctx.subscribeLive({ connection: conn }, "camera.x", "auto", (m) => got.push(m), (st) => states.push(`${st.using}/${st.mode || "-"}${st.code ? ":" + st.code : ""}`), { autoLocal: true }); await tick(); await tick(); return { conn, states, got, stop }; };
+  r = await runL("new"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "tracker/local", "auto, told to prefer it: Protect Tracker's local mode");
+  r.conn.open.get(TR)({ status: "disconnected", mode: "local" }); await tick(); await tick();
+  ok(r.conn.asked.join() === "tracker:local,tracker" && r.states.join() === "tracker/local,tracker/auto" && r.got.length === 0, "its engine's connection goes: over to its ordinary mode by itself (auto is never left with nothing)"); r.stop();
+  r = await runL("old"); ok(r.conn.asked.join() === "tracker:local,tracker" && r.states.join() === "tracker/auto", "a Protect Tracker without the local mode: its ordinary mode"); r.stop();
+  r = await runL("down"); ok(r.conn.asked.join() === "tracker:local,tracker,protect" && r.states.join() === "protect/-", "Protect Tracker answering neither way (not ready): its ordinary mode is tried, then Protect's own is used"); r.stop();
+  r = await runL(null); ok(r.conn.asked.join() === "tracker:local,protect" && r.states.join() === "protect/-", "no Protect Tracker: Protect's own, as before"); r.stop();
+  r = await run("new", "auto"); ok(r.conn.asked.join() === "tracker", "(and without the switch, auto is the ordinary mode, as it has been)"); r.stop();
+  ok(Trk.autoLocal === false, "the tracking card's switch for it is off");
+
 
   // --- the clocks: positions go by the stream clock, so a corrected wall clock moves nothing
   const B = 1_700_000_300_000, S = 55_000_000; const real = Date.now;

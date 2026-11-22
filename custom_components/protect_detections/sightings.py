@@ -130,6 +130,8 @@ class SightingLog:
                     "confidence": 0, "reports": 0, "moving": False, "desc": "",
                     "zones": [], "loiter_zones": [], "lines": [], "events": [], "edges": [],
                     "source": "local" if local else "protect", "attached": False, "protect_id": None,
+                    # when each first told of it (ms; None: never): how much sooner one was than the other
+                    "local_at": at if local else None, "protect_at": None if local else at,
                 }
             # (attached: Protect has reported it too. Said as `confirmed`, or as `attached`; a Protect id alone says it as well)
             said = tr.get("confirmed", tr.get("attached"))
@@ -138,6 +140,8 @@ class SightingLog:
                     cur["protect_id"] = pid
                     self._absorb(camera, pid, key)
                 cur["attached"] = True
+                if cur.get("protect_at") is None:
+                    cur["protect_at"] = at
                 self.claimed[(camera, pid)] = key
             elif local and said is True:
                 cur["attached"] = True
@@ -189,6 +193,7 @@ class SightingLog:
                     break
         if twin is None:
             return
+        cur["protect_at"] = twin.get("protect_at") or twin["start"]  # (Protect's own reports of it began then)
         cur["start"] = min(cur["start"], twin["start"])
         cur["end"] = max(cur["end"], twin["end"])
         cur["confidence"] = max(cur["confidence"], twin.get("confidence") or 0)

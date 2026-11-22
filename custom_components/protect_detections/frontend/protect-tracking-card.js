@@ -1275,7 +1275,8 @@ class ProtectTrackingCard extends HTMLElement {
           } else if (st.code === "unknown_command") this._state = "norelay";
           else this._note = "Couldn't start listening for this camera";
           if (!this._active) this._idle();
-        }
+        },
+        { autoLocal: ProtectTrackingCard.autoLocal }
       );
     }
     if (this._config.warm && !this._warm) {
@@ -2091,6 +2092,12 @@ if (!customElements.get("protect-tracking-card-editor")) customElements.define("
 
 // (the camera wall brings this file in too, for its tracking tiles: whichever
 // comes first defines the card)
+// `source: auto` with Protect Tracker installed: its ordinary mode, in which
+// a thing is told of once Protect has reported it (false), or its local
+// mode, in which its own model's sightings come at once and Protect's
+// details are added in flight (true). With true, what Protect reports and
+// the model never sees is not shown.
+ProtectTrackingCard.autoLocal = false;
 ProtectTrackingCard.sound = Sound; // (for the tests)
 ProtectTrackingCard.soundVoices = soundVoices;
 ProtectTrackingCard.editDefaults = EDIT_DEFAULTS;

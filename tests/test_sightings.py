@@ -205,6 +205,21 @@ log.feed("cam1", lmsg([{"id": "L7k2-41", "coord": [1, 2, 3, 4], "objectType": "p
 row = log.snapshot(now=T + 200)["sightings"][0]
 ok(row["attached"] is True and row["protect_id"] == "P5" and row["events"] == ["ev9"] and row["track"] == "L7k2-41", "confirmed: true with protectId: attached, with Protect's id and the packet's event id")
 
+# who told of it first, and by how much
+log = SightingLog()
+for n in range(30):
+    log.feed("cam1", lmsg([{"id": "L1", "coord": [1, 2, 3, 4], "objectType": "person", "confirmed": False}]), now=T + n * 33, source="local")
+log.feed("cam1", msg(T + 2400, [tr("P8", "person")]))
+log.feed("cam1", lmsg([{"id": "L1", "coord": [1, 2, 3, 4], "objectType": "person", "confirmed": True, "protectId": "P8"}]), now=T + 2500, source="local")
+row = log.snapshot(now=T + 2600)["sightings"][0]
+ok(row["local_at"] == T and row["protect_at"] == T + 2400 and row["start"] == T, "a sighting says when each first told of it: here the tracker 2.4 s before Protect")
+log = SightingLog()
+log.feed("cam1", msg(T, [tr("P9", "person")]))
+ok(log.snapshot(now=T + 10)["sightings"][0]["protect_at"] == T and log.snapshot(now=T + 10)["sightings"][0]["local_at"] is None, "one only Protect told of: no time for the tracker")
+log = SightingLog()
+log.feed("cam1", lmsg([{"id": "L2", "coord": [1, 2, 3, 4], "objectType": "person", "confirmed": False}]), now=T, source="local")
+ok(log.snapshot(now=T + 10)["sightings"][0]["protect_at"] is None, "one only the tracker told of: no time for Protect")
+
 # a Protect sighting that had just closed when the local one attached
 log = SightingLog()
 log.feed("cam1", msg(T, [tr("P1", "person")]))
