@@ -39,6 +39,10 @@
  *   live_delay: 700                         # ms the picture is held back so the boxes
  *                                           # line up with it (see protect-live.js)
  *   live_offset: 0                          # ms to place the boxes later (+) / earlier (-)
+ *   sound: none                             # a sound when it starts following someone:
+ *                                           # ping | chirp | sweep | lock (none: silent)
+ *   sound_volume: 0.5                       # 0 to 1
+ *   sound_gap: 25                           # seconds it stays quiet after sounding
  *
  * Size: in a sections view the card can be dragged to any width and height
  * and its picture fills the cell (the whole picture always shows: with bars
@@ -52,6 +56,13 @@
  * things are (while it is on screen and the page is in front; not otherwise)
  * and shows a still picture now and then. Tapping it opens the camera.
  * With the Protect Zones integration it also names the zone the person is in.
+ *
+ * The sound is made in the browser (Web Audio: no sound files). It plays once
+ * when the card goes from standing by to following, and not again until it
+ * has stood by again and `sound_gap` has passed; several cards waking together
+ * make one sound. A browser plays no sound on a page that hasn't been clicked
+ * or typed on yet: the speaker mark in the card's corner says so until it has,
+ * and a click on the mark turns the sound off or on for this browser.
  *
  * Part of the Protect Detections integration, which serves it and loads it
  * into Home Assistant by itself (no dashboard resource to add).
@@ -68,6 +79,122 @@ const HOLD_MS = 1500; // the view stays this long where they were last seen, bef
 const EASE_MS = 350;
 const FAIL_MS = 12000; // no picture this long after starting: say so
 const LAST_KEY = "protect-tracking-card:last:";
+
+// ---------------------------------------------------------------- sound
+const SOUNDS = { ping: "Rising ping", chirp: "Scanner chirp", sweep: "Soft sweep", lock: "Lock-on" };
+const SOUND_GAP_S = 25; // a card that has sounded stays quiet this long, however often it wakes (sound_gap)
+const CHORD_MS = 1500; // cards waking within this of each other: one sound
+const MUTE_KEY = "protect-tracking-card:muted";
+
+// What each sound is made of: tones, each [wave, from Hz, to Hz, starts at s,
+// lasts s, level 0-1, and for a softened one: low-pass from Hz, to Hz].
+function soundVoices(name) {
+  if (name === "ping") return [["sine", 620, 1480, 0, 0.55, 0.9], ["sine", 1240, 2960, 0, 0.3, 0.22]];
+  if (name === "chirp") return [["triangle", 980, 1040, 0, 0.09, 0.8], ["triangle", 1480, 1560, 0.11, 0.16, 0.8]];
+  if (name === "sweep") return [["sawtooth", 180, 540, 0, 0.75, 0.45, 300, 3200], ["sine", 360, 1080, 0, 0.75, 0.35]];
+  if (name === "lock") return [["square", 740, 740, 0, 0.06, 0.3, 2400, 2400], ["square", 990, 990, 0.08, 0.06, 0.3, 2400, 2400], ["square", 1320, 1320, 0.16, 0.06, 0.3, 2400, 2400], ["sine", 1760, 1760, 0.24, 0.42, 0.55]];
+  return null;
+}
+
+// One for the page, shared by every tracking card on it.
+const Sound = {
+  ctx: null,
+  gesture: false, // the page has been clicked or typed on (browsers play nothing before)
+  gestureAt: 0,
+  lastAt: 0,
+  cards: new Set(),
+
+  unlocked() {
+    const ua = typeof navigator !== "undefined" && navigator.userActivation;
+    return this.gesture || !!(ua && ua.hasBeenActive) || !!(this.ctx && this.ctx.state === "running");
+  },
+
+  muted() {
+    try {
+      return localStorage.getItem(MUTE_KEY) === "1";
+    } catch (e) {
+      return !!this._muted;
+    }
+  },
+
+  setMuted(on) {
+    this._muted = !!on;
+    try {
+      localStorage.setItem(MUTE_KEY, on ? "1" : "0");
+    } catch (e) {}
+    this.tell();
+  },
+
+  tell() {
+    for (const card of this.cards) card._mark();
+  },
+
+  watch(card) {
+    this.cards.add(card);
+    if (this._on || this.gesture) return;
+    this._on = () => {
+      this.gesture = true;
+      this.gestureAt = Date.now();
+      for (const t of ["pointerdown", "keydown"]) window.removeEventListener(t, this._on, true);
+      this._on = null;
+      if (this.ctx && this.ctx.state === "suspended") Promise.resolve(this.ctx.resume()).catch(() => {});
+      this.tell();
+    };
+    for (const t of ["pointerdown", "keydown"]) window.addEventListener(t, this._on, true);
+  },
+
+  unwatch(card) {
+    this.cards.delete(card);
+  },
+
+  // Plays it; false when it can't or mustn't (turned off here, the page not
+  // yet clicked on, another card sounding right now, no Web Audio).
+  play(name, volume, again) {
+    const voices = soundVoices(name);
+    if (!voices || this.muted() || !this.unlocked()) return false;
+    const now = Date.now();
+    if (!again && now - this.lastAt < CHORD_MS) return false;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return false;
+    try {
+      const ctx = (this.ctx = this.ctx || new AC());
+      if (ctx.state === "suspended") Promise.resolve(ctx.resume()).catch(() => {});
+      const vol = volume == null || volume === "" || !Number.isFinite(Number(volume)) ? 0.5 : Math.max(0, Math.min(1, Number(volume)));
+      const out = ctx.createGain();
+      out.gain.value = vol * 0.5;
+      out.connect(ctx.destination);
+      const t0 = ctx.currentTime + 0.03;
+      for (const [wave, from, to, at, lasts, level, lpFrom, lpTo] of voices) {
+        const t = t0 + at;
+        const osc = ctx.createOscillator();
+        osc.type = wave;
+        osc.frequency.setValueAtTime(from, t);
+        if (to !== from) osc.frequency.exponentialRampToValueAtTime(to, t + lasts);
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(level, t + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + lasts);
+        let node = osc;
+        if (lpFrom) {
+          const lp = ctx.createBiquadFilter();
+          lp.type = "lowpass";
+          lp.frequency.setValueAtTime(lpFrom, t);
+          if (lpTo !== lpFrom) lp.frequency.exponentialRampToValueAtTime(lpTo, t + lasts);
+          node.connect(lp);
+          node = lp;
+        }
+        node.connect(gain);
+        gain.connect(out);
+        osc.start(t);
+        osc.stop(t + lasts + 0.05);
+      }
+    } catch (err) {
+      return false;
+    }
+    this.lastAt = now;
+    return true;
+  },
+};
 
 function onHomeNetwork() {
   const h = location.hostname;
@@ -191,9 +318,15 @@ const STYLE = `
   .idle .note { color: var(--warning-color, #fbbf24); opacity: 1; }
   .idle .note:empty { display: none; }
   .top, .info { position: absolute; left: 8px; right: 8px; display: flex; flex-wrap: wrap; gap: 6px; pointer-events: none; }
-  .top { top: 8px; }
+  .top { top: 8px; right: 40px; }
   .info { bottom: 8px; }
   .frame:not(.active) .top, .frame:not(.active) .info { display: none; }
+  /* the speaker mark: faint while all is well, plain when no sound can be heard */
+  .snd { position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; display: grid; place-items: center;
+    background: rgba(0,0,0,.45); color: #fff; opacity: .4; cursor: pointer; --mdc-icon-size: 16px; transition: opacity .2s; }
+  .snd[hidden] { display: none; }
+  .snd:hover, .snd.locked, .snd.muted { opacity: .95; }
+  .snd.locked { color: var(--warning-color, #fbbf24); }
   .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
     line-height: 16px; background: rgba(0,0,0,.62); color: #fff; white-space: nowrap; }
   .chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c, #e0102a); }
@@ -213,6 +346,10 @@ class ProtectTrackingCard extends HTMLElement {
       throw new Error("protect-tracking-card: 'types' must be a list such as [person]");
     }
     if (config.camera != null && typeof config.camera !== "string") throw new Error("protect-tracking-card: 'camera' must be a camera entity");
+    if (typeof config.sound === "string" && config.sound !== "none" && !SOUNDS[config.sound]) {
+      throw new Error(`protect-tracking-card: 'sound' is one of none, ${Object.keys(SOUNDS).join(", ")}`);
+    }
+    const before = this._config;
     this._config = { types: ["person"], linger: 10, snapshot: 60, aspect_ratio: 16 / 9, max_zoom: 4, stream: "auto", ...config };
     this._stopAll();
     this._cams = null;
@@ -220,6 +357,54 @@ class ProtectTrackingCard extends HTMLElement {
     this._build();
     this._size();
     if (this._hass) this._discover();
+    // a sound just picked (in the card's editor): let it be heard
+    if (before && this._soundName() && (before.sound !== config.sound || before.sound_volume !== config.sound_volume)) {
+      Sound.play(this._soundName(), this._config.sound_volume, true);
+    }
+  }
+
+  // ---------------------------------------------------------------- sound
+
+  _soundName() {
+    const s = this._config && this._config.sound;
+    return s === true ? "ping" : typeof s === "string" && SOUNDS[s] ? s : null;
+  }
+
+  // Once as the card starts following: not again until it has stood by
+  // again, nor within the gap after it last sounded.
+  _chime() {
+    const name = this._soundName();
+    if (!name || this._sounded) return;
+    this._sounded = true;
+    const set = this._config.sound_gap;
+    const gap = set != null && set !== "" && Number(set) >= 0 ? Number(set) : SOUND_GAP_S;
+    const now = Date.now();
+    if (now - (this._soundAt || 0) < gap * 1000) return;
+    // (another card sounding at this moment counts: it was heard)
+    if (Sound.play(name, this._config.sound_volume) || now - Sound.lastAt < CHORD_MS) this._soundAt = now;
+  }
+
+  // The speaker mark in the corner: whether the sound can be heard here.
+  _mark() {
+    const el = this._root && this._root.querySelector(".snd");
+    if (!el) return;
+    const on = !!this._soundName();
+    el.hidden = !on;
+    if (!on) return;
+    const muted = Sound.muted();
+    const locked = !muted && !Sound.unlocked();
+    el.classList.toggle("locked", locked);
+    el.classList.toggle("muted", muted);
+    el.querySelector("ha-icon").setAttribute("icon", muted || locked ? "mdi:volume-off" : "mdi:volume-high");
+    el.title = muted ? "Sound is off in this browser. Click to turn it on" : locked ? "The browser plays no sound until this page has been clicked. Click here" : "Sound is on. Click to turn it off in this browser";
+  }
+
+  _markClick() {
+    // the click that let the browser play sound: it is heard, nothing is turned off
+    const first = Date.now() - Sound.gestureAt < 800 && !Sound.muted();
+    if (!first) Sound.setMuted(!Sound.muted());
+    if (!Sound.muted()) Sound.play(this._soundName(), this._config.sound_volume, true);
+    this._mark();
   }
 
   set hass(hass) {
@@ -292,10 +477,13 @@ class ProtectTrackingCard extends HTMLElement {
         { name: "show_others", selector: { boolean: {} } },
         { name: "warm", selector: { boolean: {} } },
         { name: "height", selector: { text: {} } },
+        { name: "sound", selector: { select: { options: [{ value: "none", label: "None" }, ...Object.entries(SOUNDS).map(([value, label]) => ({ value, label }))] } } },
+        { name: "sound_volume", selector: { number: { min: 0, max: 1, step: 0.05, mode: "slider" } } },
       ],
       computeLabel: (field) =>
         ({ camera: "Camera (empty: every camera that recognises things)", name: "Name", types: "Watch for", standby: "Standing-by look", linger: "Stay after last seen",
-          show_others: "Also box other things", warm: "Keep the stream running (instant picture)", height: "Height, e.g. 300px (empty: by shape)" })[field.name] || field.name,
+          show_others: "Also box other things", warm: "Keep the stream running (instant picture)", height: "Height, e.g. 300px (empty: by shape)",
+          sound: "Sound when it starts following (heard when picked)", sound_volume: "Sound volume" })[field.name] || field.name,
     };
   }
 
@@ -310,6 +498,8 @@ class ProtectTrackingCard extends HTMLElement {
       });
     }
     this._seenBy?.observe(this);
+    Sound.watch(this);
+    this._mark();
     this._tick = setInterval(() => {
       if (!document.hidden && this._onScreen !== false) this._askSeen();
       this._idle();
@@ -320,6 +510,7 @@ class ProtectTrackingCard extends HTMLElement {
   disconnectedCallback() {
     document.removeEventListener("visibilitychange", this._onVisible);
     this._seenBy?.disconnect();
+    Sound.unwatch(this);
     clearInterval(this._tick);
     this._stopAll();
   }
@@ -337,6 +528,7 @@ class ProtectTrackingCard extends HTMLElement {
           <div class="idle"><ha-icon icon="mdi:account-eye-outline"></ha-icon><b></b><span></span><small></small><small class="note"></small></div>
           <div class="top"><span class="chip live"><i></i><span class="cam"></span></span><span class="chip warn" hidden></span></div>
           <div class="info"></div>
+          <button class="snd" type="button" hidden><ha-icon></ha-icon></button>
         </div>
       </ha-card>`;
     this._root = root;
@@ -344,6 +536,11 @@ class ProtectTrackingCard extends HTMLElement {
     frame.classList.add(`s-${STANDBY.includes(this._config.standby) ? this._config.standby : "radar"}`);
     if (typeof this._config.accent === "string" && this._config.accent) frame.style.setProperty("--tracking-accent", this._config.accent);
     frame.addEventListener("click", () => this._open());
+    root.querySelector(".snd").addEventListener("click", (ev) => {
+      ev.stopPropagation(); // (not a tap on the card)
+      this._markClick();
+    });
+    this._mark();
     this._idle();
   }
 
@@ -648,6 +845,7 @@ class ProtectTrackingCard extends HTMLElement {
     }
     root.querySelector(".blips").replaceChildren();
     frame.classList.add("active", "lock");
+    this._chime();
     clearTimeout(this._lockTimer);
     this._lockTimer = setTimeout(() => frame.classList.remove("lock"), LOCK_MS);
     root.querySelector(".cam").textContent = cam.name;
@@ -670,6 +868,7 @@ class ProtectTrackingCard extends HTMLElement {
     const a = this._active;
     if (!a) return;
     this._active = null;
+    this._sounded = false; // standing by again: the next one may sound
     cancelAnimationFrame(a.raf);
     const root = this._root;
     if (this._warm && this._warm.stream === a.stream) LiveTracks.hold(a.stream, 0);
@@ -846,6 +1045,8 @@ class ProtectTrackingCard extends HTMLElement {
 
 // (the camera wall brings this file in too, for its tracking tiles: whichever
 // comes first defines the card)
+ProtectTrackingCard.sound = Sound; // (for the tests)
+ProtectTrackingCard.soundVoices = soundVoices;
 if (!customElements.get("protect-tracking-card")) customElements.define("protect-tracking-card", ProtectTrackingCard);
 window.customCards = window.customCards || [];
 if (!window.customCards.some((c) => c.type === "protect-tracking-card")) window.customCards.push({

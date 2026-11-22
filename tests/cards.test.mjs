@@ -954,6 +954,85 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const css = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8");
   ok(/\.playing \.snap \{[^}]*opacity: 0/.test(css) && /\.frame \{[^}]*background: #000/.test(css), "what the live picture doesn't cover is the card's plain black");
 }
+// --- the tracking card's sound
+{
+  ctx.document.hidden = false; ctx.localStorage.store = {};
+  const S = Trk.sound; let made = 0, tones = 0, level = null;
+  if (S._on) S._on(); // (the cards of the tests above were waiting for a first click too)
+  const param = () => ({ value: 0, setValueAtTime() {}, exponentialRampToValueAtTime() {} });
+  const node = (extra = {}) => ({ connect(n) { return n; }, ...extra });
+  class AC { constructor() { made++; this.state = "running"; this.currentTime = 0; this.destination = {}; }
+    createOscillator() { return node({ frequency: param(), start() { tones++; }, stop() {} }); }
+    createGain() { const g = node({ gain: param() }); if (level === null) level = g; return g; }
+    createBiquadFilter() { return node({ frequency: param() }); } resume() { this.state = "running"; return Promise.resolve(); } }
+  win.AudioContext = AC;
+  const reg = { "camera.p_high_resolution_channel": { device_id: "d1", platform: "unifiprotect" }, "camera.q_high_resolution_channel": { device_id: "d2", platform: "unifiprotect" } };
+  const states = Object.fromEntries(Object.keys(reg).map((e) => [e, { entity_id: e, state: "recording", attributes: { channel_id: 0 } }]));
+  const mkc = async (cfg) => { const subs = new Map();
+    const h = { ...hass, entities: reg, states, devices: { d1: { name: "Front" }, d2: { name: "Back" } },
+      connection: { subscribeMessage: (cb, m) => { subs.set(m.entity, cb); return Promise.resolve(() => subs.delete(m.entity)); } },
+      callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { "camera.p_high_resolution_channel": "p1", "camera.q_high_resolution_channel": "q1" } });
+        if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
+    const c = new Trk(); c.setConfig(cfg); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick();
+    c.see = (type = "person") => subs.get(cfg.camera)({ clockWall: Date.now() - 400, tracks: [{ id: type, coord: [400, 400, 60, 160], objectType: type }] }); return c; };
+  const P = "camera.p_high_resolution_channel", Q = "camera.q_high_resolution_channel";
+  const plays = () => { const n = tones; tones = 0; return n; };
+  const later = (ms, f) => { const real = Date.now; const at = real() + ms; Date.now = () => at; try { return f(); } finally { Date.now = real; } };
+  const reset = () => { S.lastAt = 0; tones = 0; };
+  const snd = (c) => c._root.querySelector(".snd");
+  ok(Object.keys(Trk.getConfigForm().schema.find((f) => f.name === "sound").selector.select.options).length === 5 && ["ping", "chirp", "sweep", "lock"].every((n) => Trk.soundVoices(n).length >= 2) && Trk.soundVoices("none") === null, "four sounds to pick from in the editor (and none), each made of tones");
+  let threw = false; try { new Trk().setConfig({ sound: "klaxon" }); } catch (e) { threw = true; } ok(threw, "an unknown sound is refused");
+  // off by default
+  S.gesture = true; let c = await mkc({ camera: P }); c.see();
+  ok(!!c._active && plays() === 0 && made === 0 && snd(c).hidden === true, "sound: off unless asked for (nothing made, no mark)"); c.disconnectedCallback();
+  c = await mkc({ camera: P, sound: "none" }); c.see(); ok(plays() === 0 && snd(c).hidden === true, "sound: none is silent too"); c.disconnectedCallback();
+  // the page not clicked on yet: nothing plays, and the mark says so
+  S.gesture = false; S.ctx = null; reset(); const keys0 = win.count("keydown"); // (other cards listen for keys too)
+  c = await mkc({ camera: P, sound: "chirp", sound_gap: 20 });
+  ok(snd(c).hidden === false && snd(c).classList.contains("locked") && /no sound until/.test(snd(c).title) && win.count("pointerdown") === 1 && win.count("keydown") === keys0 + 1, "page not clicked on yet: the mark shows that no sound can play, and the first click is waited for");
+  c.see(); ok(!!c._active && plays() === 0 && made === 0, "someone appears meanwhile: followed, silently (no audio is even set up)");
+  c._leave();
+  // the first click anywhere unlocks it
+  win.dispatchEvent(new Ev("pointerdown"));
+  ok(S.gesture && !snd(c).classList.contains("locked") && win.count("pointerdown") === 0 && win.count("keydown") === keys0, "the first click on the page: the mark clears, and nothing keeps listening for clicks");
+  later(1000, () => c.see()); ok(plays() === 2 && made === 1, "standing by -> following: the sound plays (and it hadn't sounded before, so no waiting)");
+  later(1250, () => c.see()); later(1500, () => c.see()); ok(plays() === 0, "more reports of the same person: no more sound");
+  // back to standby and following again too soon: quiet; after the gap: again
+  c._leave(); later(10000, () => c.see()); ok(!!c._active && plays() === 0, "gone and back within the gap: followed, but quiet");
+  later(10500, () => c._leave()); later(22000, () => c.see()); ok(plays() === 2, "after the gap: it sounds again");
+  later(23000, () => c._leave());
+  // other kinds don't
+  later(60000, () => c.see("vehicle")); ok(!c._active && plays() === 0, "a kind it isn't watching: no sound");
+  c.disconnectedCallback();
+  c = await mkc({ camera: P, sound: "ping", show_others: true }); reset(); later(60000, () => c.see("vehicle")); ok(!c._active && plays() === 0, "nor for the faint dots of other things"); c.disconnectedCallback();
+  // two cards waking together: one sound
+  reset(); const c1 = await mkc({ camera: P, sound: "ping" }), c2 = await mkc({ camera: Q, sound: "lock" });
+  later(100000, () => { c1.see(); c2.see(); }); ok(!!c1._active && !!c2._active && plays() === 2, "two cards waking together: one sound, not both");
+  later(101000, () => { c1._leave(); c2._leave(); }); later(104000, () => c2.see()); ok(plays() === 0, "and the one that kept quiet waits out its gap like the other");
+  c1.disconnectedCallback(); c2.disconnectedCallback();
+  // volume
+  reset(); level = null; c = await mkc({ camera: P, sound: "sweep", sound_volume: 0.2 }); later(200000, () => c.see()); ok(Math.abs(level.gain.value - 0.1) < 1e-9 && plays() === 2, "sound_volume sets how loud");
+  later(201000, () => c._leave());
+  // the mark: off and on for this browser
+  reset(); S.gestureAt = 0; snd(c).dispatchEvent(new Ev("click", { stopPropagation() {} }));
+  ok(S.muted() && snd(c).classList.contains("muted") && ctx.localStorage.store["protect-tracking-card:muted"] === "1" && plays() === 0, "a click on the mark: off in this browser (remembered)");
+  later(300000, () => c.see()); ok(!!c._active && plays() === 0, "turned off: followed silently"); later(301000, () => c._leave());
+  const other = await mkc({ camera: Q, sound: "ping" }); ok(snd(other).classList.contains("muted"), "the other cards on the page show it too");
+  snd(c).dispatchEvent(new Ev("click", { stopPropagation() {} })); ok(!S.muted() && !snd(other).classList.contains("muted") && plays() === 2, "another click: on again, and heard at once");
+  other.disconnectedCallback();
+  // the click that unlocks the page, made on the mark itself: heard, not turned off
+  S.gesture = false; S.ctx = null; S.gestureAt = 0; c.disconnectedCallback(); c = await mkc({ camera: P, sound: "ping" }); reset();
+  win.dispatchEvent(new Ev("pointerdown")); snd(c).dispatchEvent(new Ev("click", { stopPropagation() {} }));
+  ok(!S.muted() && plays() === 2 && !snd(c).classList.contains("locked"), "the unlocking click made on the mark itself: the sound is heard and stays on");
+  // picking a sound in the editor: heard
+  reset(); c.setConfig({ camera: P, sound: "ping" }); ok(plays() === 0, "the same config again: nothing plays");
+  c.setConfig({ camera: P, sound: "lock" }); ok(plays() === 4, "another sound picked (the editor): it is heard");
+  reset(); c.setConfig({ camera: P, sound: "lock", sound_volume: 0.8 }); ok(plays() === 4, "the volume changed: heard at the new volume");
+  reset(); c.setConfig({ camera: P, sound: "none" }); ok(plays() === 0 && snd(c).hidden === true, "none picked: silence, and the mark goes");
+  // no Web Audio in this browser
+  delete win.AudioContext; S.ctx = null; reset(); c.setConfig({ camera: P, sound: "ping" }); c.hass = c._hass; await tick(); ok(plays() === 0, "a browser without Web Audio: nothing breaks");
+  c.disconnectedCallback(); ctx.localStorage.store = {}; S.gesture = false; S.ctx = null; S.lastAt = 0;
+}
 // --- tracking tiles on the wall
 {
   ctx.document.addEventListener ||= () => {}; ctx.document.removeEventListener ||= () => {}; ctx.document.hidden = false; ctx.localStorage.store = {};

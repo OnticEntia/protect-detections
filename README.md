@@ -127,6 +127,16 @@ Watches every camera that recognises things and shows whichever one sees a perso
 | `aspect_ratio` | `1.7778` | Width / height, where the view does not set the height. |
 | `height` | – | A fixed height instead (`300`, `300px`, `40vh`). |
 | `live_delay`, `live_offset` | `700`, `0` | As on the camera wall. |
+| `sound` | `none` | A sound when it starts following: `ping` (a rising ping), `chirp` (a two-tone scanner chirp), `sweep` (a soft sweep) or `lock` (three blips and a tone). |
+| `sound_volume` | `0.5` | How loud, from `0` to `1`. |
+| `sound_gap` | `25` | Seconds the card stays quiet after it has sounded. |
+
+**Sound.** The sounds are made in the browser (no sound files) and play on the device showing the dashboard. A sound plays once when the card goes from standing by to following, not for every report, and not again until the card has stood by again and `sound_gap` has passed. Several tracking cards waking at the same moment make one sound. Things to know:
+
+- A browser plays no sound on a page until it has been clicked or typed on. Until then the speaker mark in the card's corner is highlighted; any click on the page clears it.
+- A click on the speaker mark turns the sound off or on for that browser (all tracking cards in it).
+- The card listens only while it is on screen and its tab is in front, so a tab in the background makes no sound.
+- In the card's editor, picking a sound or moving the volume plays it.
 
 In a *Sections* view the card can be dragged to any width and height.
 
