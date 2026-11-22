@@ -136,9 +136,11 @@ Watches every camera that recognises things and shows whichever one sees a perso
 - A browser plays no sound on a page until it has been clicked or typed on. Until then the speaker mark in the card's corner is highlighted; any click on the page clears it.
 - A click on the speaker mark turns the sound off or on for that browser (all tracking cards in it).
 - The card listens only while it is on screen and its tab is in front, so a tab in the background makes no sound.
-- In the card's editor, picking a sound or moving the volume plays it.
+- In the card's editor, every click on a sound plays it, the one already picked included, and letting go of the volume slider plays the picked sound at the new volume. If nothing can be heard (sound turned off in this browser, or a browser without Web Audio), the editor says so beside the picker.
 
 In a *Sections* view the card can be dragged to any width and height.
+
+The card's editor shows, for everything the config leaves out, what the card does by default. Those defaults are not written to the config; only what you change is.
 
 "Last seen" comes from the integration's own record (below), so it is the same on every device and counts people who came by while no dashboard was open.
 

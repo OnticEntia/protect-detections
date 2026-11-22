@@ -980,7 +980,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const later = (ms, f) => { const real = Date.now; const at = real() + ms; Date.now = () => at; try { return f(); } finally { Date.now = real; } };
   const reset = () => { S.lastAt = 0; tones = 0; };
   const snd = (c) => c._root.querySelector(".snd");
-  ok(Object.keys(Trk.getConfigForm().schema.find((f) => f.name === "sound").selector.select.options).length === 5 && ["ping", "chirp", "sweep", "lock"].every((n) => Trk.soundVoices(n).length >= 2) && Trk.soundVoices("none") === null, "four sounds to pick from in the editor (and none), each made of tones");
+  ok(["ping", "chirp", "sweep", "lock"].every((n) => Trk.soundVoices(n).length >= 2) && Trk.soundVoices("none") === null, "four sounds, each made of tones");
   let threw = false; try { new Trk().setConfig({ sound: "klaxon" }); } catch (e) { threw = true; } ok(threw, "an unknown sound is refused");
   // off by default
   S.gesture = true; let c = await mkc({ camera: P }); c.see();
@@ -1024,14 +1024,73 @@ ok(w._built && !w._building, "next good config builds after a failure");
   S.gesture = false; S.ctx = null; S.gestureAt = 0; c.disconnectedCallback(); c = await mkc({ camera: P, sound: "ping" }); reset();
   win.dispatchEvent(new Ev("pointerdown")); snd(c).dispatchEvent(new Ev("click", { stopPropagation() {} }));
   ok(!S.muted() && plays() === 2 && !snd(c).classList.contains("locked"), "the unlocking click made on the mark itself: the sound is heard and stays on");
-  // picking a sound in the editor: heard
-  reset(); c.setConfig({ camera: P, sound: "ping" }); ok(plays() === 0, "the same config again: nothing plays");
-  c.setConfig({ camera: P, sound: "lock" }); ok(plays() === 4, "another sound picked (the editor): it is heard");
-  reset(); c.setConfig({ camera: P, sound: "lock", sound_volume: 0.8 }); ok(plays() === 4, "the volume changed: heard at the new volume");
-  reset(); c.setConfig({ camera: P, sound: "none" }); ok(plays() === 0 && snd(c).hidden === true, "none picked: silence, and the mark goes");
+  // the config set again (another sound, another volume): the card itself stays quiet (the editor is what plays a picked sound)
+  reset(); c.setConfig({ camera: P, sound: "lock", sound_volume: 0.8 }); ok(plays() === 0, "a changed config doesn't make the card sound");
+  c.setConfig({ camera: P, sound: "none" }); ok(snd(c).hidden === true, "none: the mark goes");
   // no Web Audio in this browser
   delete win.AudioContext; S.ctx = null; reset(); c.setConfig({ camera: P, sound: "ping" }); c.hass = c._hass; await tick(); ok(plays() === 0, "a browser without Web Audio: nothing breaks");
   c.disconnectedCallback(); ctx.localStorage.store = {}; S.gesture = false; S.ctx = null; S.lastAt = 0;
+}
+// --- the tracking card's editor
+{
+  ctx.localStorage.store = {};
+  const S = Trk.sound; if (S._on) S._on(); let tones = 0, level = null;
+  const param = () => ({ value: 0, setValueAtTime() {}, exponentialRampToValueAtTime() {} });
+  const node = (extra = {}) => ({ connect(n) { return n; }, ...extra });
+  win.AudioContext = class { constructor() { this.state = "running"; this.currentTime = 0; this.destination = {}; }
+    createOscillator() { return node({ frequency: param(), start() { tones++; }, stop() {} }); }
+    createGain() { const g = node({ gain: param() }); if (level === null) level = g; return g; }
+    createBiquadFilter() { return node({ frequency: param() }); } resume() { return Promise.resolve(); } };
+  const plays = () => { const n = tones; tones = 0; return n; };
+  const mke = (cfg) => { const e = Trk.getConfigElement(); const out = []; e.addEventListener("config-changed", (ev) => out.push(ev.detail.config)); e.hass = hass; e.setConfig(cfg); e.connectedCallback(); e.out = out; return e; };
+  const change = (e, patch) => e._form.dispatchEvent(new Ev("value-changed", { detail: { value: { ...e._form.data, ...patch } }, stopPropagation() {} }));
+  const click = (e, name) => e._picks.get(name).dispatchEvent(new Ev("click"));
+  const on = (e) => [...e._picks].filter(([, b]) => b.classList.contains("on")).map(([v]) => v).join();
+  // what it shows for a config that says almost nothing
+  let e = mke({ type: "custom:protect-tracking-card", sound: "lock" });
+  const d = e._form.data;
+  ok(d.types.join() === "person" && d.standby === "radar" && d.linger === 10 && d.show_others === false && d.warm === false, "editor: what the config leaves out is shown as the card does it (people, radar, 10 s, off, off)");
+  ok(!("camera" in d) && !("name" in d) && !("height" in d), "what has no default (camera, name, height) is shown empty");
+  ok(on(e) === "lock" && e._range.value === "0.5" && e._volText.textContent === "50%", "the sound picked is marked, and the volume shows the 0.5 it plays at");
+  const cardDefaults = new Trk(); cardDefaults.setConfig({});
+  ok(["types", "linger"].every((k) => JSON.stringify(cardDefaults._config[k]) === JSON.stringify(Trk.editDefaults[k])) && e._form.schema.every((f) => f.name in Trk.editDefaults || ["camera", "name", "height"].includes(f.name)), "every field is covered, and the defaults shown are the card's own");
+  ok(e._form.hass === hass && e._form.computeLabel({ name: "types" }) === "Watch for", "the form gets Home Assistant and its labels");
+  // nothing is written until something is changed
+  change(e, {}); ok(e.out.length === 0, "nothing changed: nothing is saved (the defaults shown are not written)");
+  change(e, { linger: 20 });
+  ok(e.out.length === 1 && JSON.stringify(e.out[0]) === JSON.stringify({ type: "custom:protect-tracking-card", sound: "lock", linger: 20 }), "one field changed: only that one is written");
+  change(e, { types: ["person", "vehicle"] }); ok(e.out[1].types.join() === "person,vehicle" && !("standby" in e.out[1]) && !("warm" in e.out[1]), "another: the rest still left out");
+  change(e, { types: ["person"] }); ok(e.out[2].types.join() === "person", "set back to the default by hand: it was changed, so it stays written");
+  change(e, { linger: null }); ok(!("linger" in e.out[3]) && e._form.data.linger === 10, "a field emptied: taken out of the config, and it shows the default again");
+  change(e, { name: "Door" }); change(e, { name: "" }); ok(e.out[4].name === "Door" && !("name" in e.out[5]), "text put in and taken out again");
+  e.disconnectedCallback();
+  e = mke({ types: ["vehicle"], standby: "pulse", linger: 30, warm: true, height: 300, sound_volume: 0.2 });
+  ok(e._form.data.types.join() === "vehicle" && e._form.data.standby === "pulse" && e._form.data.linger === 30 && e._form.data.warm === true && e._form.data.height === "300" && e._range.value === "0.2" && on(e) === "none", "what the config does say is shown as it is");
+  e.disconnectedCallback();
+  // sounds: every click is heard
+  S.gesture = false; S.ctx = null; S.lastAt = 0; plays();
+  e = mke({ sound: "lock" });
+  ok(!e._note.hidden && /no sound until/.test(e._note.textAll), "page not clicked on yet: said beside the picker");
+  click(e, "lock"); ok(plays() === 4 && e.out.length === 0 && e._note.hidden, "a click on the sound already picked: heard, nothing to save (and the click is what lets the browser play)");
+  click(e, "lock"); ok(plays() === 4, "and again: heard again");
+  ok(S.lastAt === 0, "hearing it in the editor doesn't count as the card having sounded");
+  click(e, "ping"); ok(plays() === 2 && e.out.length === 1 && e.out[0].sound === "ping" && on(e) === "ping", "another sound: heard once, picked and saved");
+  click(e, "none"); ok(plays() === 0 && !("sound" in e.out[1]) && on(e) === "none", "None: silent, and the option is taken out");
+  click(e, "none"); ok(plays() === 0 && e.out.length === 2, "None again: still silent, nothing saved");
+  click(e, "sweep"); plays();
+  // volume: heard when the slider is let go
+  level = null; e._range.value = "0.8"; e._range.dispatchEvent(new Ev("input")); ok(e._volText.textContent === "80%" && plays() === 0, "the slider moving: the number follows, no sound yet");
+  e._range.dispatchEvent(new Ev("change")); ok(plays() === 2 && Math.abs(level.gain.value - 0.4) < 1e-9 && e.out[e.out.length - 1].sound_volume === 0.8, "let go: the picked sound at the new volume, and saved");
+  e.disconnectedCallback(); e = mke({ sound: "ping" }); e._range.value = "0.5"; e._range.dispatchEvent(new Ev("change")); ok(plays() === 2 && e.out.length === 0, "let go on the default volume: heard, not written");
+  e._picks.get("none"); e.setConfig({}); e._range.value = "0.3"; e._range.dispatchEvent(new Ev("change")); ok(plays() === 0 && e.out[0].sound_volume === 0.3, "no sound picked: the volume is kept, silently");
+  // turned off in this browser: said, with a way to turn it on
+  e.setConfig({ sound: "chirp" }); S.setMuted(true);
+  ok(!e._note.hidden && /turned off in this browser/.test(e._note.textAll) && e._note.children.some((x) => x.textContent === "Turn on"), "sound turned off in this browser: the editor says so");
+  click(e, "chirp"); ok(plays() === 0 && !e._note.hidden, "a click then: silent, and still said why");
+  e._note.children.find((x) => x.textContent === "Turn on").dispatchEvent(new Ev("click")); ok(!S.muted() && plays() === 2 && e._note.hidden, "Turn on: on again, heard, the note goes");
+  // no Web Audio
+  delete win.AudioContext; S.ctx = null; e.setConfig({ sound: "chirp" }); click(e, "chirp"); ok(/can't make these sounds/.test(e._note.textAll), "a browser without Web Audio: said too");
+  e.disconnectedCallback(); ctx.localStorage.store = {}; S.gesture = false; S.ctx = null; S.lastAt = 0;
 }
 // --- tracking tiles on the wall
 {
@@ -1246,7 +1305,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
   c = new Trk(); c.setConfig({ height: "red; position: fixed" }); ok(!c.hasAttribute("fixed") && c.style._v["--tracking-height"] === undefined, "something that isn't a length is ignored");
   c = new Trk(); c.setConfig({ height: 300 }); c.layout = "grid"; ok(c.hasAttribute("fill") && !c.hasAttribute("fixed"), "in a sections view the cell wins over height:");
   c = new Trk(); c.setConfig({ embedded: true, height: 300 }); c.layout = "grid"; ok(!c.hasAttribute("fill") && !c.hasAttribute("fixed"), "on the camera wall it takes its size from the wall's tile, whatever else is said");
-  const form = Trk.getConfigForm(); ok(Array.isArray(form.schema) && form.schema.some((f) => f.name === "types") && form.computeLabel({ name: "types" }) === "Watch for", "the card editor has a small form");
+  ok(typeof Trk.getConfigForm === "undefined" && Trk.getConfigElement() instanceof defs["protect-tracking-card-editor"], "the card has an editor of its own");
 }
 // --- digital zoom
 {

@@ -149,11 +149,13 @@ const Sound = {
 
   // Plays it; false when it can't or mustn't (turned off here, the page not
   // yet clicked on, another card sounding right now, no Web Audio).
-  play(name, volume, again) {
+  // `preview` (the editor, the speaker mark): heard whatever just sounded,
+  // and it doesn't count as the card having sounded.
+  play(name, volume, preview) {
     const voices = soundVoices(name);
     if (!voices || this.muted() || !this.unlocked()) return false;
     const now = Date.now();
-    if (!again && now - this.lastAt < CHORD_MS) return false;
+    if (!preview && now - this.lastAt < CHORD_MS) return false;
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return false;
     try {
@@ -191,7 +193,7 @@ const Sound = {
     } catch (err) {
       return false;
     }
-    this.lastAt = now;
+    if (!preview) this.lastAt = now;
     return true;
   },
 };
@@ -349,7 +351,6 @@ class ProtectTrackingCard extends HTMLElement {
     if (typeof config.sound === "string" && config.sound !== "none" && !SOUNDS[config.sound]) {
       throw new Error(`protect-tracking-card: 'sound' is one of none, ${Object.keys(SOUNDS).join(", ")}`);
     }
-    const before = this._config;
     this._config = { types: ["person"], linger: 10, snapshot: 60, aspect_ratio: 16 / 9, max_zoom: 4, stream: "auto", ...config };
     this._stopAll();
     this._cams = null;
@@ -357,10 +358,6 @@ class ProtectTrackingCard extends HTMLElement {
     this._build();
     this._size();
     if (this._hass) this._discover();
-    // a sound just picked (in the card's editor): let it be heard
-    if (before && this._soundName() && (before.sound !== config.sound || before.sound_volume !== config.sound_volume)) {
-      Sound.play(this._soundName(), this._config.sound_volume, true);
-    }
   }
 
   // ---------------------------------------------------------------- sound
@@ -465,26 +462,9 @@ class ProtectTrackingCard extends HTMLElement {
     else this.style.removeProperty("--tracking-height");
   }
 
-  // The card editor's form (the rest is YAML: see the top of this file).
-  static getConfigForm() {
-    return {
-      schema: [
-        { name: "camera", selector: { entity: { domain: "camera", integration: "unifiprotect" } } },
-        { name: "name", selector: { text: {} } },
-        { name: "types", selector: { select: { multiple: true, options: Object.entries(KINDS).map(([value, [label]]) => ({ value, label })) } } },
-        { name: "standby", selector: { select: { options: STANDBY.map((value) => ({ value, label: value.charAt(0).toUpperCase() + value.slice(1) })) } } },
-        { name: "linger", selector: { number: { min: 1, max: 120, mode: "box", unit_of_measurement: "s" } } },
-        { name: "show_others", selector: { boolean: {} } },
-        { name: "warm", selector: { boolean: {} } },
-        { name: "height", selector: { text: {} } },
-        { name: "sound", selector: { select: { options: [{ value: "none", label: "None" }, ...Object.entries(SOUNDS).map(([value, label]) => ({ value, label }))] } } },
-        { name: "sound_volume", selector: { number: { min: 0, max: 1, step: 0.05, mode: "slider" } } },
-      ],
-      computeLabel: (field) =>
-        ({ camera: "Camera (empty: every camera that recognises things)", name: "Name", types: "Watch for", standby: "Standing-by look", linger: "Stay after last seen",
-          show_others: "Also box other things", warm: "Keep the stream running (instant picture)", height: "Height, e.g. 300px (empty: by shape)",
-          sound: "Sound when it starts following (heard when picked)", sound_volume: "Sound volume" })[field.name] || field.name,
-    };
+  // The card's editor (the rest is YAML: see the top of this file).
+  static getConfigElement() {
+    return document.createElement("protect-tracking-card-editor");
   }
 
   connectedCallback() {
@@ -1043,10 +1023,230 @@ class ProtectTrackingCard extends HTMLElement {
   }
 }
 
+// ---------------------------------------------------------------- editor
+//
+// The card's editor is its own, not a form Home Assistant builds from a
+// list of fields, for two things such a form can't do: show what the card
+// really does for everything the config leaves out (a field left out is
+// shown with its default, and stays left out until it is changed), and play
+// a sound on every click on it, the one already picked included.
+
+// What the card does where the config says nothing (as setConfig has it).
+const EDIT_DEFAULTS = { types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, sound: "none", sound_volume: 0.5 };
+const EDIT_FORM = [
+  { name: "camera", selector: { entity: { domain: "camera", integration: "unifiprotect" } } },
+  { name: "name", selector: { text: {} } },
+  { name: "types", selector: { select: { multiple: true, options: Object.entries(KINDS).map(([value, [label]]) => ({ value, label })) } } },
+  { name: "standby", selector: { select: { options: STANDBY.map((value) => ({ value, label: value.charAt(0).toUpperCase() + value.slice(1) })) } } },
+  { name: "linger", selector: { number: { min: 1, max: 120, mode: "box", unit_of_measurement: "s" } } },
+  { name: "show_others", selector: { boolean: {} } },
+  { name: "warm", selector: { boolean: {} } },
+  { name: "height", selector: { text: {} } },
+];
+const EDIT_LABELS = { camera: "Camera (empty: every camera that recognises things)", name: "Name (empty: the camera's)", types: "Watch for", standby: "Standing-by look",
+  linger: "Stay after last seen", show_others: "Also box other things", warm: "Keep the stream running (instant picture)", height: "Height, e.g. 300px (empty: by shape)" };
+const EDIT_STYLE = `
+  :host { display: block; }
+  .sound { margin-top: 20px; }
+  .label { font-size: 14px; color: var(--secondary-text-color); margin-bottom: 8px; }
+  .picks { display: flex; flex-wrap: wrap; gap: 8px; }
+  .picks button { font: inherit; font-size: 14px; padding: 7px 14px; border-radius: 999px; cursor: pointer; color: var(--primary-text-color);
+    background: transparent; border: 1px solid var(--divider-color, #8884); }
+  .picks button.on { background: var(--primary-color); border-color: var(--primary-color); color: var(--text-primary-color, #fff); }
+  .vol { display: flex; align-items: center; gap: 12px; margin-top: 14px; font-size: 14px; color: var(--secondary-text-color); }
+  .vol input { flex: 1; accent-color: var(--primary-color); }
+  .vol b { min-width: 3.2em; text-align: right; font-weight: 500; color: var(--primary-text-color); }
+  .note { margin-top: 10px; font-size: 13px; color: var(--warning-color, #b45309); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .note[hidden] { display: none; }
+  .note button { font: inherit; padding: 3px 10px; border-radius: 999px; cursor: pointer; background: transparent; color: inherit; border: 1px solid currentColor; }
+`;
+
+function sameValue(a, b) {
+  return Array.isArray(a) && Array.isArray(b) ? a.length === b.length && [...a].sort().join("\n") === [...b].sort().join("\n") : a === b;
+}
+
+class ProtectTrackingCardEditor extends HTMLElement {
+  setConfig(config) {
+    this._config = { ...(config || {}) };
+    this._show();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._form) this._form.hass = hass;
+  }
+
+  connectedCallback() {
+    Sound.watch(this); // (told when sound is turned off or on, or the page is first clicked)
+    this._show();
+  }
+
+  disconnectedCallback() {
+    Sound.unwatch(this);
+  }
+
+  // What each field shows: the config's value, or what the card does without one.
+  _values() {
+    const cfg = this._config || {};
+    const out = {};
+    for (const { name } of EDIT_FORM) {
+      if (cfg[name] != null && cfg[name] !== "") out[name] = cfg[name];
+      else if (name in EDIT_DEFAULTS) out[name] = EDIT_DEFAULTS[name];
+    }
+    if (typeof out.height === "number") out.height = String(out.height); // (a text field)
+    return out;
+  }
+
+  _sound() {
+    const s = this._config && this._config.sound;
+    return s === true ? "ping" : typeof s === "string" && SOUNDS[s] ? s : "none";
+  }
+
+  _volume() {
+    const v = this._config && this._config.sound_volume;
+    return v == null || v === "" || !Number.isFinite(Number(v)) ? EDIT_DEFAULTS.sound_volume : Math.max(0, Math.min(1, Number(v)));
+  }
+
+  _make() {
+    const root = this.attachShadow({ mode: "open" });
+    const el = (tag, cls, text) => {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text != null) e.textContent = text;
+      return e;
+    };
+    const style = el("style", "", EDIT_STYLE);
+    const form = (this._form = el("ha-form"));
+    form.schema = EDIT_FORM;
+    form.computeLabel = (field) => EDIT_LABELS[field.name] || field.name;
+    form.addEventListener("value-changed", (ev) => {
+      ev.stopPropagation();
+      this._formChanged((ev.detail && ev.detail.value) || {});
+    });
+    const sound = el("div", "sound");
+    const picks = el("div", "picks");
+    this._picks = new Map();
+    for (const [value, label] of [["none", "None"], ...Object.entries(SOUNDS)]) {
+      const b = el("button", "", label);
+      b.type = "button";
+      b.addEventListener("click", () => this._pick(value));
+      this._picks.set(value, b);
+      picks.appendChild(b);
+    }
+    const vol = el("label", "vol");
+    const range = (this._range = el("input"));
+    Object.assign(range, { type: "range", min: "0", max: "1", step: "0.05" });
+    this._volText = el("b");
+    range.addEventListener("input", () => (this._volText.textContent = `${Math.round(Number(range.value) * 100)}%`));
+    range.addEventListener("change", () => this._volumeSet(Number(range.value))); // (let go of)
+    vol.append(el("span", "", "Volume"), range, this._volText);
+    this._note = el("div", "note");
+    sound.append(el("div", "label", "Sound when it starts following (click one to hear it)"), picks, vol, this._note);
+    root.append(style, form, sound);
+    // (Home Assistant loads its form element only where one is used: ask for it)
+    if (!customElements.get("ha-form") && window.loadCardHelpers) {
+      Promise.resolve(window.loadCardHelpers())
+        .then((h) => h.createCardElement({ type: "entities", entities: [] }))
+        .then(() => customElements.whenDefined("hui-entities-card"))
+        .then(() => customElements.get("hui-entities-card").getConfigElement())
+        .catch(() => {});
+    }
+  }
+
+  _show() {
+    if (!this._config) return;
+    if (!this._form) this._make();
+    this._form.hass = this._hass;
+    this._form.data = this._values();
+    const now = this._sound();
+    for (const [value, b] of this._picks) b.classList.toggle("on", value === now);
+    const vol = this._volume();
+    this._range.value = String(vol);
+    this._volText.textContent = `${Math.round(vol * 100)}%`;
+    this._mark();
+  }
+
+  // Why nothing is heard, said beside the picker.
+  _mark(failed) {
+    const note = this._note;
+    if (!note) return;
+    let text = "";
+    let fix = null;
+    if (!(window.AudioContext || window.webkitAudioContext)) text = "This browser can't make these sounds.";
+    else if (Sound.muted()) {
+      text = "Sound is turned off in this browser (the speaker mark on the card), so nothing is heard.";
+      fix = () => {
+        Sound.setMuted(false);
+        if (this._sound() !== "none") Sound.play(this._sound(), this._volume(), true);
+      };
+    } else if (!Sound.unlocked()) text = "The browser plays no sound until this page has been clicked. Click a sound.";
+    else if (failed) text = "The browser didn't play the sound.";
+    note.hidden = !text;
+    note.replaceChildren();
+    if (!text) return;
+    note.append(document.createTextNode(text));
+    if (fix) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "Turn on";
+      b.addEventListener("click", fix);
+      note.append(b);
+    }
+  }
+
+  _hear(name, volume) {
+    Sound.gesture = true; // (this is a click on the page: the browser plays sound from here on)
+    const played = name === "none" || Sound.play(name, volume, true);
+    this._mark(!played);
+    for (const card of Sound.cards) if (card !== this) card._mark();
+  }
+
+  // A click on a sound: heard every time, the one already picked too.
+  _pick(value) {
+    this._hear(value, this._volume());
+    if (value === this._sound()) return;
+    const config = { ...this._config };
+    if (value === "none") delete config.sound;
+    else config.sound = value;
+    this._emit(config);
+  }
+
+  _volumeSet(value) {
+    value = Math.max(0, Math.min(1, Math.round(value * 100) / 100));
+    this._hear(this._sound(), value);
+    // (left out of the config and still the default: stays left out)
+    const had = this._config.sound_volume != null && this._config.sound_volume !== "";
+    if (had ? Number(this._config.sound_volume) === value : value === EDIT_DEFAULTS.sound_volume) return;
+    this._emit({ ...this._config, sound_volume: value });
+  }
+
+  // The form's fields: one left out of the config stays out while it shows
+  // its default; an emptied one is taken out.
+  _formChanged(data) {
+    const config = { ...this._config };
+    for (const { name } of EDIT_FORM) {
+      const v = data[name];
+      const empty = v == null || v === "" || (Array.isArray(v) && !v.length);
+      if (empty) delete config[name];
+      else if (!(name in this._config) && name in EDIT_DEFAULTS && sameValue(v, EDIT_DEFAULTS[name])) continue;
+      else config[name] = v;
+    }
+    if (JSON.stringify(config) !== JSON.stringify(this._config)) this._emit(config);
+  }
+
+  _emit(config) {
+    this._config = config;
+    this._show();
+    this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
+  }
+}
+if (!customElements.get("protect-tracking-card-editor")) customElements.define("protect-tracking-card-editor", ProtectTrackingCardEditor);
+
 // (the camera wall brings this file in too, for its tracking tiles: whichever
 // comes first defines the card)
 ProtectTrackingCard.sound = Sound; // (for the tests)
 ProtectTrackingCard.soundVoices = soundVoices;
+ProtectTrackingCard.editDefaults = EDIT_DEFAULTS;
 if (!customElements.get("protect-tracking-card")) customElements.define("protect-tracking-card", ProtectTrackingCard);
 window.customCards = window.customCards || [];
 if (!window.customCards.some((c) => c.type === "protect-tracking-card")) window.customCards.push({
