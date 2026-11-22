@@ -1265,6 +1265,57 @@ ok(w._built && !w._building, "next good config builds after a failure");
     ok(/prefers-reduced-motion: reduce\) \{\s*\.box, \.box::before, \.scan \.reticle/.test(css) && css.includes(".bs-reticle .info { display: none; }") && css.includes(".box .tag { display: none; }"), "(the style sheet: no flights or pulsing for less motion; the tag only in reticle style, the chips only in plain)");
   }
 
+  // --- the face inset
+  {
+    const person = (t, extra = {}) => ({ id: "p", coord: [300 + t * 0.02, 250, 100, 300], objectType: "person", stationary: false, confidence: 90, ...extra });
+    const faceOf = (t, extra = {}) => ({ id: "p:face", coord: [330 + t * 0.02, 262, 30, 40], objectType: "face", of: "p", local: true, ...extra });
+    const up = async (cfg, first) => { const c2 = await mkc({ types: ["person"], ...cfg }); c2.run(300, first); const v = Object.assign(new El(), { tagName: "VIDEO", videoWidth: 3840, videoHeight: 2160, readyState: 4, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 562 }) }); c2._active.stream.querySelectorAll = () => [v]; c2._root.querySelector(".zoomer").getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 562 }); c2.vid = v; return c2; };
+    const pip = (c2) => c2._root.querySelector(".pip"); const cvs = (c2) => pip(c2).firstElementChild;
+    const draws = (c2) => (cvs(c2)._g ? cvs(c2)._g.calls.filter((x) => x[0] === "drawImage") : []);
+    const both = (t) => [person(t), faceOf(t)];
+    // a person with a face: the inset
+    c = await up({}, both); ok(!pip(c).classList.contains("on") || draws(c).length >= 0, "(set up)"); c.run(1500, both);
+    ok(pip(c).classList.contains("on") && c._root.querySelector(".tether").classList.contains("on"), "a followed person whose face is reported: the inset is shown, with its line to the face");
+    const d = draws(c)[draws(c).length - 1]; const T2 = c.T - 300;
+    const fx = (330 + T2 * 0.02 + 15) / 1000 * 3840, fy = (262 + 20) / 1000 * 2160; const side = Math.max(30 / 1000 * 3840, 40 / 1000 * 2160) * 1.7;
+    ok(d[1] === c.vid && Math.abs(d[2] + d[4] / 2 - fx) < 40 && Math.abs(d[3] + d[5] / 2 - fy) < 20 && Math.abs(d[4] - side) < 4 && d[4] === d[5], `it is cut from the playing video round the face, square, with room round it (${Math.round(d[4])} px of the stream; the face itself ${Math.round(c._active.pip.px)} px across)`);
+    ok(Math.abs(c._active.pip.px - 115) < 2, "(a face 3 % of the picture wide: about 115 px across on a 4K stream)");
+    const size = parseFloat(pip(c).style.cssText.match(/width:(\d+)px/)[1]); ok(size >= 64 && size <= 200 && cvs(c).width === size && d[8] === size, "drawn at the size it is shown, pixel for pixel: " + size);
+    // nothing kept: only drawn to, never read back
+    const used = new Set(cvs(c)._g.calls.map((x) => x[0]));
+    ok([...used].every((k) => k === "drawImage") && Object.keys(ctx.localStorage.store).every((k) => !/pip|face/i.test(k)), "the inset's canvas is only ever drawn to (no reading back, no export), and nothing about it goes into storage");
+    const src = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8");
+    ok(!/toDataURL|toBlob|captureStream|getImageData|createImageBitmap|MediaRecorder/.test(src), "the card's code has no way of taking a picture off a canvas at all");
+    // the head turns: the face isn't reported for a second; held, then gone
+    const n0 = draws(c).length; c.run(1000, (t) => [person(t)]);
+    ok(pip(c).classList.contains("on") && draws(c).length > n0 && !c._root.querySelector(".tether").classList.contains("on"), "the face not reported for a second: the inset keeps its place and goes on showing the picture there (no line: there is no face to point at)");
+    c.run(1500, (t) => [person(t)]); ok(!pip(c).classList.contains("on"), "none for over two seconds: it goes");
+    c.run(500, both); ok(pip(c).classList.contains("on"), "the face is back: so is the inset");
+    // the person lost: gone with them
+    c.run(1500, () => null); ok(!pip(c).classList.contains("on"), "the person lost: the inset goes with them");
+    c.disconnectedCallback();
+    // Protect's own face (no `of`), inside the person's box
+    c = await up({}, (t) => [person(t), { id: "f1", coord: [335 + t * 0.02, 265, 28, 36], objectType: "face" }]); c.run(1500, (t) => [person(t), { id: "f1", coord: [335 + t * 0.02, 265, 28, 36], objectType: "face" }]);
+    ok(pip(c).classList.contains("on"), "a face of Protect's own inside the person's box counts as theirs"); c.disconnectedCallback();
+    c = await up({}, (t) => [person(t), { id: "f2", coord: [800, 265, 28, 36], objectType: "face" }]); c.run(1500, (t) => [person(t), { id: "f2", coord: [800, 265, 28, 36], objectType: "face" }]);
+    ok(!pip(c).classList.contains("on"), "a face somewhere else in the picture does not"); c.disconnectedCallback();
+    // off, other kinds, split, small cards
+    c = await up({ face_pip: "off" }, both); c.run(1500, both); ok(!pip(c).classList.contains("on") && draws(c).length === 0, "face_pip: off: never, and nothing drawn"); c.disconnectedCallback();
+    c = await up({ types: ["vehicle"] }, (t) => [{ id: "v", coord: [300 + t * 0.02, 250, 100, 60], objectType: "vehicle", stationary: false }, { id: "v:face", coord: [330, 262, 30, 40], objectType: "face", of: "v" }]); c.run(1500, (t) => [{ id: "v", coord: [300 + t * 0.02, 250, 100, 60], objectType: "vehicle", stationary: false }, { id: "v:face", coord: [330, 262, 30, 40], objectType: "face", of: "v" }]);
+    ok(!pip(c).classList.contains("on"), "never for anything but a person"); c.disconnectedCallback();
+    c = await up({}, both); Object.assign(c._root.querySelector(".frame"), { clientWidth: 200, clientHeight: 120 }); c.run(1500, both); ok(!pip(c).classList.contains("on"), "a card too small for it: no inset"); c.disconnectedCallback();
+    c = await up({ split: 2 }, (t) => [...both(t), { id: "q", coord: [700 - t * 0.02, 250, 100, 300], objectType: "person", stationary: false }]); c.run(2500, (t) => [...both(t), { id: "q", coord: [700 - t * 0.02, 250, 100, 300], objectType: "person", stationary: false }]);
+    ok(c._root.querySelector(".frame").classList.contains("split") && !pip(c).classList.contains("on"), "in a split view: no inset"); c.disconnectedCallback();
+    c = await up({}, both); c.run(1500, both); c._leave(); ok(!pip(c).classList.contains("on"), "standing by again: gone"); c.disconnectedCallback();
+    // which corner
+    const corner = Trk.pipCorner;
+    ok(corner(null, [400, 150, 200, 260], 1000, 562, 180).corner === "br" && corner(null, [700, 300, 250, 260], 1000, 562, 180).corner === "bl", "the corner: bottom right by default; another when the person is there");
+    ok(corner("br", [600, 300, 250, 260], 1000, 562, 180).corner !== "br" && corner("bl", [400, 150, 200, 260], 1000, 562, 180).corner === "bl", "it moves out of the way when the person walks under it, and otherwise stays where it is (no going back for nothing)");
+    ok(corner("br", null, 1000, 562, 180).corner === "br" && corner(null, [0, 0, 1000, 562], 1000, 562, 180).corner === "br", "nobody to avoid, or nowhere to go: it stays");
+    const where = corner(null, [400, 150, 200, 260], 1000, 562, 180); ok(where.left === 1000 - 180 - 8 && where.top === 562 - 180 - 8, "(8 px in from the card's edges)");
+    ok(new Trk().constructor.faceOf({ t: { id: "p", type: "vehicle" }, box: [0, 0, 100, 100] }, [{ t: { type: "face" }, of: "p", box: [1, 1, 5, 5] }]) === null, "(faceOf: only people have one)");
+  }
+
   // steady zoom: the box's size wobbling a little between packets doesn't move the zoom
   c = await mkc({ types: ["person"] });
   c.run(3000, (t) => [{ id: "w", coord: [400, 300, 60 + ((t / 100) % 2 ? 2 : -2), 180 + ((t / 100) % 2 ? 4 : -4)], objectType: "person", stationary: false }]);

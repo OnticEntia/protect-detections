@@ -49,6 +49,9 @@
  *   box_style: reticle                      # how the followed thing is marked: reticle
  *                                           # (the scanner's own brackets close onto it,
  *                                           # follow it and let it go) | plain (a box)
+ *   face_pip: auto                          # auto: while a person is followed and their
+ *                                           # face is reported, the face enlarged in a
+ *                                           # corner | off
  *   split: off                              # 2, 3 or 4: with that many things of a watched
  *                                           # kind on the move, a pane for each (at most),
  *                                           # each zoomed in on its own; off: one view, on
@@ -110,6 +113,21 @@
  * those who ask for less motion there are no flights: things are where they
  * belong at once.
  *
+ * The face inset (`face_pip: auto`). While the card follows a person whose
+ * face is reported (by Protect Tracker as a track of that person, or by
+ * Protect as a face inside the person's box), the face is shown enlarged in
+ * a corner, moving with the picture. It is the playing video itself, cut
+ * out onto a canvas each frame, as the panes of a split view are: no second
+ * stream. Nothing of it is kept: no picture is read back from the canvas,
+ * saved, or sent anywhere, and it is gone with the frame. It keeps to the
+ * corner the person is furthest from, keeps its place for two seconds when
+ * the face is not reported (a head turned), and fades when there has been
+ * none for longer or the person is lost. How sharp it is depends on the
+ * stream: a face 3 % of the picture wide is about 115 px across on a 4K
+ * main stream and about 38 px on a 720p one (`stream: high` is what it
+ * wants; `auto` uses the main stream on the home network). Not in a split
+ * view, and never for anything but a person.
+ *
  * Split view (`split: 2` to `4`). When a second thing of a watched kind has
  * been moving for a second, the picture splits into panes, one for each
  * (up to the number given), each zoomed in on its own thing. The panes are
@@ -161,6 +179,11 @@ const BOX_STYLES = ["reticle", "plain"];
 const HOP_MS = 300; // the brackets moving over to another subject
 const CLOSE_MS = 380; // the brackets closing onto a subject just acquired
 const RELEASE_MS = 450; // the reticle opening back out to its place
+// The face inset (`face_pip`): the followed person's face, enlarged, in a corner.
+const PIP_HOLD_MS = 2000; // the face not reported (a head turned): its place is kept this long
+const PIP_PAD = 1.7; // the cut-out is this many times the face's larger side (some room round it)
+const PIP_MIN = 150; // a card smaller than this (px, its shorter side) has no inset
+const PIP_CORNER_MS = 1200; // the inset stays in its corner at least this long
 const FAIL_MS = 12000; // no picture this long after starting: say so
 const LAST_KEY = "protect-tracking-card:last:";
 
@@ -480,6 +503,23 @@ const STYLE = `
   .panes canvas { display: block; width: 100%; height: 100%; min-width: 0; min-height: 0; }
   .frame.split .zoomer { opacity: 0; }
   .frame.split .info { display: none; }
+  /* the face inset, and the line from the face to it */
+  .pip { position: absolute; visibility: hidden; opacity: 0; pointer-events: none; background: #000; transition: opacity .35s, visibility 0s .35s; --bc: var(--tracking-accent, var(--primary-color, #e0102a)); }
+  .pip.on { visibility: visible; opacity: 1; transition: opacity .25s; }
+  .pip canvas { display: block; width: 100%; height: 100%; }
+  .bs-plain .pip { outline: 1px solid rgba(255,255,255,.75); border-radius: 3px; overflow: hidden; }
+  .bs-reticle .pip { outline: 1px solid color-mix(in srgb, var(--bc) 35%, transparent); }
+  .bs-reticle .pip::before { content: ""; position: absolute; inset: -3px; pointer-events: none;
+    background:
+      linear-gradient(var(--bc), var(--bc)) top left / 22% 2px no-repeat, linear-gradient(var(--bc), var(--bc)) top left / 2px 22% no-repeat,
+      linear-gradient(var(--bc), var(--bc)) top right / 22% 2px no-repeat, linear-gradient(var(--bc), var(--bc)) top right / 2px 22% no-repeat,
+      linear-gradient(var(--bc), var(--bc)) bottom left / 22% 2px no-repeat, linear-gradient(var(--bc), var(--bc)) bottom left / 2px 22% no-repeat,
+      linear-gradient(var(--bc), var(--bc)) bottom right / 22% 2px no-repeat, linear-gradient(var(--bc), var(--bc)) bottom right / 2px 22% no-repeat; }
+  .tether { position: absolute; left: 0; top: 0; height: 1px; transform-origin: 0 0; pointer-events: none; visibility: hidden;
+    background: color-mix(in srgb, var(--tracking-accent, var(--primary-color, #e0102a)) 60%, transparent); }
+  .bs-reticle .tether.on { visibility: visible; }
+  .frame:not(.active) .pip, .frame.split .pip, .frame:not(.active) .tether, .frame.split .tether { visibility: hidden; opacity: 0; }
+  @media (prefers-reduced-motion: reduce) { .pip { transition: none !important; } }
   .dbg { position: absolute; left: 8px; right: 8px; bottom: 36px; padding: 3px 7px; border-radius: 4px; background: rgba(0,0,0,.7); color: #fff;
     font: 11px/1.4 ui-monospace, monospace; pointer-events: none; }
   .dbg[hidden], .frame:not(.active) .dbg { display: none; }
@@ -681,6 +721,119 @@ class ProtectTrackingCard extends HTMLElement {
     }
   }
 
+  // ------------------------------------------------------- the face inset
+
+  // The face that goes with a followed person: one reported as theirs, or
+  // (Protect's own) one inside the upper part of their box.
+  static faceOf(subject, all) {
+    if (!subject || subject.t.type !== "person") return null;
+    const sid = String(subject.t.id);
+    const [sx, sy, sw, sh] = subject.box;
+    return (
+      all.find((n) => n.t.type === "face" && n.of === sid) ||
+      all.find((n) => {
+        if (n.t.type !== "face" || n.of != null) return false;
+        const [cx, cy] = [n.box[0] + n.box[2] / 2, n.box[1] + n.box[3] / 2];
+        return cx >= sx && cx <= sx + sw && cy >= sy && cy <= sy + sh * 0.6;
+      }) ||
+      null
+    );
+  }
+
+  // Which corner the inset goes in: the one where it covers least of the
+  // person (rects as [left, top, width, height] on the card). It stays where
+  // it is unless that corner now covers them and another covers much less.
+  static pipCorner(prev, person, W, H, size) {
+    const m = 8;
+    const top = 40; // (clear of the chips along the top)
+    const spots = { br: [W - size - m, H - size - m], bl: [m, H - size - m], tr: [W - size - m, top], tl: [m, top] };
+    const cover = ([l, t]) => {
+      if (!person) return 0;
+      const w = Math.min(l + size, person[0] + person[2]) - Math.max(l, person[0]);
+      const h = Math.min(t + size, person[1] + person[3]) - Math.max(t, person[1]);
+      return w > 0 && h > 0 ? w * h : 0;
+    };
+    let best = "br";
+    for (const k of Object.keys(spots)) if (cover(spots[k]) < cover(spots[best])) best = k;
+    const keep = prev && spots[prev] && (cover(spots[prev]) === 0 || cover(spots[best]) > cover(spots[prev]) * 0.5);
+    const corner = keep ? prev : best;
+    return { corner, left: spots[corner][0], top: spots[corner][1] };
+  }
+
+  // One frame of the inset: shown or not, where, and the face cut out of the playing picture.
+  _pip(a, subject, all, place, view, W, H, now, split) {
+    const root = this._root;
+    const wrap = root.querySelector(".pip");
+    const line = root.querySelector(".tether");
+    const p = (a.pip = a.pip || { at: 0, view: null, forId: null, corner: null, cornerAt: 0, px: 0 });
+    const off = this._config.face_pip === "off" || this._config.face_pip === false;
+    const video = a.video;
+    const vw = video && video.videoWidth;
+    const vh = video && video.videoHeight;
+    const roomy = Math.min(W, H) >= PIP_MIN;
+    const face = !off && !split && roomy ? ProtectTrackingCard.faceOf(subject, all) : null;
+    if (subject && p.forId !== subject.t.id) Object.assign(p, { view: null, forId: subject.t.id, at: 0 }); // (another person: not the last one's face)
+    if (face && vw && vh) {
+      // where the face is, in the stream's own pixels: a square round it with some room
+      const [fx, fy, fw, fh] = [(face.box[0] / 1000) * vw, (face.box[1] / 1000) * vh, (face.box[2] / 1000) * vw, (face.box[3] / 1000) * vh];
+      const want = { x: fx + fw / 2, y: fy + fh / 2, side: Math.max(24, Math.max(fw, fh) * PIP_PAD) };
+      const f = p.view && p.drawnAt && !a.calm ? 1 - Math.exp(-Math.min(250, now - p.drawnAt) / EASE_MS) : 1;
+      p.view = p.view ? { x: p.view.x + (want.x - p.view.x) * f, y: p.view.y + (want.y - p.view.y) * f, side: p.view.side + (want.side - p.view.side) * f } : want;
+      p.at = now;
+      p.px = fw;
+    }
+    // (not reported for a moment, a head turned: its place is kept)
+    const show = !off && !split && roomy && !!subject && !!p.view && !!vw && now - p.at < PIP_HOLD_MS;
+    wrap.classList.toggle("on", show);
+    line.classList.toggle("on", show && !!face);
+    if (!show) {
+      if (now - p.at >= PIP_HOLD_MS) p.view = null;
+      p.drawnAt = 0;
+      return;
+    }
+    p.drawnAt = now;
+    // its size and corner: away from the person, as they are on the card now
+    const size = Math.max(64, Math.min(200, Math.round(Math.min(W, H) * 0.34)));
+    const onCard = (b) => [(place[0] + (b[0] / 1000) * place[2]) * view.s + view.x, (place[1] + (b[1] / 1000) * place[3]) * view.s + view.y, (b[2] / 1000) * place[2] * view.s, (b[3] / 1000) * place[3] * view.s];
+    // (it stays put for a moment after a move, whatever the person does: no hopping about)
+    const settled = !!p.corner && now - p.cornerAt < PIP_CORNER_MS;
+    const use = ProtectTrackingCard.pipCorner(p.corner, settled ? null : onCard(subject.box), W, H, size);
+    if (use.corner !== p.corner) {
+      p.corner = use.corner;
+      p.cornerAt = now;
+    }
+    const css = `left:${use.left.toFixed(0)}px;top:${use.top.toFixed(0)}px;width:${size}px;height:${size}px`;
+    if (wrap.style.cssText !== css) wrap.style.cssText = css;
+    // the cut-out, drawn from the playing video (nothing is read back from the canvas or kept)
+    const cv = wrap.firstElementChild;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const px = Math.round(size * dpr);
+    if (cv.width !== px) cv.width = px;
+    if (cv.height !== px) cv.height = px;
+    const side = Math.min(p.view.side, vw, vh);
+    const sx = Math.max(0, Math.min(vw - side, p.view.x - side / 2));
+    const sy = Math.max(0, Math.min(vh - side, p.view.y - side / 2));
+    try {
+      cv.getContext("2d").drawImage(video, sx, sy, side, side, 0, 0, px, px);
+    } catch (e) {}
+    // the line from the face on the picture to the inset's nearest corner
+    if (face) {
+      const fb = onCard(face.box);
+      const [x1, y1] = [fb[0] + fb[2] / 2, fb[1] + fb[3] / 2];
+      const x2 = x1 < use.left ? use.left : use.left + size;
+      const y2 = y1 < use.top ? use.top : use.top + size;
+      const len = Math.hypot(x2 - x1, y2 - y1);
+      line.style.cssText = `width:${len.toFixed(1)}px;transform:translate(${x1.toFixed(1)}px, ${y1.toFixed(1)}px) rotate(${Math.atan2(y2 - y1, x2 - x1).toFixed(4)}rad)`;
+    }
+  }
+
+  _pipEnd() {
+    const root = this._root;
+    if (!root) return;
+    root.querySelector(".pip").classList.remove("on");
+    root.querySelector(".tether").classList.remove("on");
+  }
+
   _splitEnd(a) {
     const root = this._root;
     if (!root) return;
@@ -839,6 +992,8 @@ class ProtectTrackingCard extends HTMLElement {
           <div class="top"><span class="chip live"><i></i><span class="cam"></span></span><span class="chip src" hidden></span><span class="chip warn" hidden></span></div>
           <div class="info"></div>
           <div class="panes"></div>
+          <div class="tether"></div>
+          <div class="pip"><canvas></canvas></div>
           <div class="dbg" hidden></div>
           <button class="snd" type="button" hidden><ha-icon></ha-icon></button>
         </div>
@@ -1264,6 +1419,7 @@ class ProtectTrackingCard extends HTMLElement {
     clearTimeout(this._lockTimer);
     root.querySelector(".frame").classList.remove("active", "lock", "playing");
     this._splitEnd(null);
+    this._pipEnd();
     // Release: the reticle starts where the brackets were (the picture is
     // whole again by now) and opens back out to its place as the scanner
     // fades in. For those who ask for less motion it is simply back.
@@ -1437,7 +1593,7 @@ class ProtectTrackingCard extends HTMLElement {
       // live_debug: how the boxes are being timed
       const dbg = root.querySelector(".dbg");
       dbg.hidden = !cfg.live_debug;
-      if (cfg.live_debug) dbg.textContent = lt.describe(behind);
+      if (cfg.live_debug) dbg.textContent = lt.describe(behind) + (a.pip && a.pip.px ? ` · face ${Math.round(a.pip.px)} px across in the stream` : "");
     }
     const place = a.place || [0, 0, W, H];
 
@@ -1563,6 +1719,7 @@ class ProtectTrackingCard extends HTMLElement {
       a.viewKey = key;
       root.querySelector(".zoomer").style.transform = key;
     }
+    this._pip(a, subject, all, place, { s, x, y }, W, H, now, split);
 
     // who it is on: kind, how sure, which zones
     const names = (this._zones && this._zones[a.sub.cam.id]) || {};
@@ -1610,7 +1767,7 @@ class ProtectTrackingCard extends HTMLElement {
 // a sound on every click on it, the one already picked included.
 
 // What the card does where the config says nothing (as setConfig has it).
-const EDIT_DEFAULTS = { box_style: "reticle", types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, split: "off", sound: "none", sound_volume: 0.5 };
+const EDIT_DEFAULTS = { face_pip: "auto", box_style: "reticle", types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, split: "off", sound: "none", sound_volume: 0.5 };
 const EDIT_FORM = [
   { name: "camera", selector: { entity: { domain: "camera", integration: "unifiprotect" } } },
   { name: "name", selector: { text: {} } },
@@ -1620,12 +1777,13 @@ const EDIT_FORM = [
   { name: "show_others", selector: { boolean: {} } },
   { name: "warm", selector: { boolean: {} } },
   { name: "box_style", selector: { select: { options: [{ value: "reticle", label: "Reticle: the scanner's brackets close onto it" }, { value: "plain", label: "Plain box" }] } } },
+  { name: "face_pip", selector: { select: { options: [{ value: "auto", label: "Shown while a followed person's face is reported" }, { value: "off", label: "Off" }] } } },
   { name: "split", selector: { select: { options: [{ value: "off", label: "One view, on the subject" }, { value: "2", label: "Up to 2 panes" }, { value: "3", label: "Up to 3 panes" }, { value: "4", label: "Up to 4 panes" }] } } },
   { name: "height", selector: { text: {} } },
 ];
 const EDIT_LABELS = { camera: "Camera (empty: every camera that recognises things)", name: "Name (empty: the camera's)", types: "Watch for", standby: "Standing-by look",
   linger: "Stay after last seen", show_others: "Also box other things", warm: "Live picture while standing by (keeps the stream running)", height: "Height, e.g. 300px (empty: by shape)",
-  split: "Several things moving at once", box_style: "How the followed thing is marked" };
+  split: "Several things moving at once", box_style: "How the followed thing is marked", face_pip: "Face inset (the face enlarged in a corner)" };
 const EDIT_STYLE = `
   :host { display: block; }
   .sound { margin-top: 20px; }
