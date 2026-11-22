@@ -84,6 +84,7 @@ Best in a view of type *Panel*. With no options it shows one feed per UniFi Prot
 | `live_tracks` | `true` | `false` hides the Boxes button. |
 | `live_delay` | `700` | Milliseconds the live picture is held back while Boxes is on, so boxes line up with it. |
 | `live_offset` | `0` | Milliseconds to draw the boxes later (+) or earlier (−). |
+| `live_debug` | `false` | `true` writes on the live picture how the boxes are being timed (see Troubleshooting). |
 | `zone_overlay` | `true` | `false` never shows zones (needs Protect Zones' overlay). |
 | `phone_landscape` | `true` | `false` keeps the dialog upright on a phone. |
 
@@ -126,7 +127,7 @@ Watches every camera that recognises things and shows whichever one sees a perso
 | `max_zoom` | `4` | How far it zooms in. |
 | `aspect_ratio` | `1.7778` | Width / height, where the view does not set the height. |
 | `height` | – | A fixed height instead (`300`, `300px`, `40vh`). |
-| `live_delay`, `live_offset` | `700`, `0` | As on the camera wall. |
+| `live_delay`, `live_offset`, `live_debug` | `700`, `0`, `false` | As on the camera wall. |
 | `sound` | `none` | A sound when it starts following: `ping` (a rising ping), `chirp` (a two-tone scanner chirp), `sweep` (a soft sweep) or `lock` (three blips and a tone). |
 | `sound_volume` | `0.5` | How loud, from `0` to `1`. |
 | `sound_gap` | `25` | Seconds the card stays quiet after it has sounded. |
@@ -186,7 +187,7 @@ HACS installs one repository at a time and does not install Protect Zones for yo
 | "Custom element doesn't exist" for a card | Refresh the browser (clear its cache if needed) after installing or updating. Check that the integration is loaded. |
 | A card shows twice-defined errors in the browser console | Remove old dashboard resources pointing at these cards; the integration loads them now. |
 | No Boxes button, no tracking tile | The camera must recognise things (smart detections), and the integration must be a version with live tracking. |
-| Boxes sit ahead of or behind the picture | Adjust `live_offset`. Browsers that cannot hold a live picture back draw the boxes late. |
+| Boxes sit ahead of or behind the picture | The boxes are right in place; what can be off is time. Set `live_debug: true` and read the line on the picture. "by frame timestamps" (WebRTC in a browser that reports them) is exact. "by estimate" is a best guess: fair on WebRTC, rough on HLS, where `live_offset` is the trim (positive if the boxes run ahead of things, negative if they trail). |
 | Clips do not play | The camera must be recording in Protect for the time of the detection. Some browsers cannot play HEVC; the card then asks for an H.264 copy, which takes a little longer. |
 | No talk button | The camera needs a speaker, and the page must be on https (or the talk window is used). |
 | The tracking card didn't react to someone | Ask `protect_detections/live/seen` for that time. A sighting of the right kind means Protect reported them and the card wasn't listening (it listens only while on screen). A gap means the feed was down. Neither means Protect's live tracking didn't report them. |

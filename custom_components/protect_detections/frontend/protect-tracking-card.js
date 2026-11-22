@@ -41,6 +41,8 @@
  *   live_delay: 700                         # ms the picture is held back so the boxes
  *                                           # line up with it (see protect-live.js)
  *   live_offset: 0                          # ms to place the boxes later (+) / earlier (-)
+ *   live_debug: false                       # true: write on the picture how the boxes
+ *                                           # are being timed
  *   sound: none                             # a sound when it starts following someone:
  *                                           # ping | chirp | sweep | lock (none: silent)
  *   sound_volume: 0.5                       # 0 to 1
@@ -342,6 +344,9 @@ const STYLE = `
   .snd[hidden] { display: none; }
   .snd:hover, .snd.locked, .snd.muted { opacity: .95; }
   .snd.locked { color: var(--warning-color, #fbbf24); }
+  .dbg { position: absolute; left: 8px; right: 8px; bottom: 36px; padding: 3px 7px; border-radius: 4px; background: rgba(0,0,0,.7); color: #fff;
+    font: 11px/1.4 ui-monospace, monospace; pointer-events: none; }
+  .dbg[hidden], .frame:not(.active) .dbg { display: none; }
   .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
     line-height: 16px; background: rgba(0,0,0,.62); color: #fff; white-space: nowrap; }
   .chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c, #e0102a); }
@@ -521,6 +526,7 @@ class ProtectTrackingCard extends HTMLElement {
           <div class="idle"><ha-icon icon="mdi:account-eye-outline"></ha-icon><b></b><span></span><small></small><small class="note"></small></div>
           <div class="top"><span class="chip live"><i></i><span class="cam"></span></span><span class="chip warn" hidden></span></div>
           <div class="info"></div>
+          <div class="dbg" hidden></div>
           <button class="snd" type="button" hidden><ha-icon></ha-icon></button>
         </div>
       </ha-card>`;
@@ -952,6 +958,10 @@ class ProtectTrackingCard extends HTMLElement {
       const failed = !a.playing && now - a.since > FAIL_MS;
       warn.hidden = !failed;
       if (failed) warn.textContent = "The live picture didn't start";
+      // live_debug: how the boxes are being timed
+      const dbg = root.querySelector(".dbg");
+      dbg.hidden = !cfg.live_debug;
+      if (cfg.live_debug) dbg.textContent = lt.describe(behind);
     }
     const place = a.place || [0, 0, W, H];
 

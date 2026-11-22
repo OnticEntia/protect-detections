@@ -333,6 +333,9 @@ const LIVE_STYLE = `
   .frame.zoomed { cursor: grab; touch-action: none; }
   /* what the camera is tracking, live */
   .lboxes { position: absolute; pointer-events: none; }
+  .ldebug { position: absolute; left: 8px; bottom: 8px; max-width: calc(100% - 16px); padding: 3px 7px; border-radius: 4px; background: rgba(0,0,0,.7); color: #fff;
+    font: 11px/1.4 ui-monospace, monospace; pointer-events: none; z-index: 3; }
+  .ldebug[hidden] { display: none; }
   .lbox-it { position: absolute; box-sizing: border-box; border: calc(2px * var(--k, 1)) solid var(--c, #fff); border-radius: calc(3px * var(--k, 1));
     pointer-events: none; }
   .lbox-it span { position: absolute; left: 0; bottom: 100%; margin-bottom: 3px; white-space: nowrap; font-size: 12px; font-weight: 600; color: #fff;
@@ -1998,6 +2001,7 @@ class CameraWallCard extends HTMLElement {
               <div class="video"></div>
               <svg class="zones" style="display:none"></svg>
               <div class="lboxes" style="display:none"></div>
+              <div class="ldebug" hidden></div>
             </div>
             <div class="zone-note" hidden>Zones hidden: the camera isn't at the position they were drawn for</div>
             <div class="zbar" hidden></div>
@@ -2864,6 +2868,12 @@ class CameraWallCard extends HTMLElement {
         const k = (this._zoom && this._zoom.s) || 1;
         lt.place = [(pic.left - frame.left) / k, (pic.top - frame.top) / k, pic.width / k, pic.height / k];
       } else lt.place = null;
+      // live_debug: how the boxes are being timed, written on the picture
+      const dbg = root.querySelector(".ldebug");
+      if (dbg) {
+        dbg.hidden = !this._config.live_debug;
+        if (this._config.live_debug) dbg.textContent = lt.describe(behind);
+      }
     }
     const place = lt.place;
     // boxes

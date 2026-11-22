@@ -757,24 +757,26 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const tr = (id, x, type = "vehicle", stationary = false) => ({ id, coord: [x, 400, 100, 50], objectType: type, stationary, desc: type === "vehicle" ? "gray suv" : "" });
   send(0, [tr("1", 100)]); send(250, [tr("1", 150)]); send(500, [tr("1", 200), tr("9", 700, "vehicle", true)]); send(750, [tr("1", 250)]);
   ok(lt.gap === 500 && lt.tracks.get("1").pts.length === 4, "messages kept per thing; our clock against the camera's from the quickest one");
-  ok(JSON.stringify(Wall._ltAt(lt.tracks.get("1"), T0 + 125)) === "[125,400,100,50]" && Wall._ltAt(lt.tracks.get("1"), T0 - 1) === null && JSON.stringify(Wall._ltAt(lt.tracks.get("1"), T0 + 1000)) === "[250,400,100,50]" && Wall._ltAt(lt.tracks.get("1"), T0 + 2000) === null, "a position between two reports is in between; none before the first, the last one held briefly, then gone");
+  ok(JSON.stringify(Wall._ltAt(lt.tracks.get("1"), T0 + 125)) === "[125,400,100,50]" && Wall._ltAt(lt.tracks.get("1"), T0 - 1) === null && Wall._ltAt(lt.tracks.get("1"), T0 + 2000) === null, "a position between two reports is in between; none before the first; gone a while after the last");
+  ok(JSON.stringify(Wall._ltAt(lt.tracks.get("1"), T0 + 1000)) === "[300,400,100,50]" && JSON.stringify(Wall._ltAt(lt.tracks.get("1"), T0 + 1300)) === "[310,400,100,50]", "past the newest report it keeps moving as it did (for 300 ms at most, then stays)");
+  { const one = new ctx.LiveTracks(); one.message({ clockWall: T0, tracks: [tr("s", 100)] }); ok(JSON.stringify(Wall._ltAt(one.tracks.get("s"), T0 + 200)) === "[100,400,100,50]", "a thing reported once stays where it was"); }
   // one frame, at a moment of our choosing
   const frameAt = (ourMs) => { const real = Date.now; Date.now = () => ourMs; try { w._ltFrame(lt); } finally { Date.now = real; } };
   lt.statsAt = 0; frameAt(T0 + 1500); await tick(); await tick();
   ok(recv.every((r) => r.jitterBufferTarget === 700) && lt.kind === "webrtc" && lt.can === true, "WebRTC: the browser is asked to hold 700 ms of picture, sound included");
-  const behind = w._ltBehind(lt); ok(Math.abs(behind - (250 + 700)) < 1, "until it says what it really holds, that is what is counted on");
-  // on screen at our T0+1500: the camera's moment T0+1500-500+330-950 = T0+380 -> x between 150 and 200
+  const behind = w._ltBehind(lt); ok(Math.abs(behind - (420 + 700)) < 1 && lt.sync === "estimate", "until it says what it really holds, that is what is counted on (on top of what the camera's second stream is behind)");
+  // on screen at our T0+1500: the camera's moment T0+1500-500+330-1120 = T0+210 -> x between 100 and 150
   lt.placeAt = 0; frameAt(T0 + 1500);
   const layer = root.querySelector(".lboxes"); const box = lt.els.get("1");
   console.log("   box:", box && box.style.cssText, "| layer:", layer.style.cssText);
-  ok(!!box && /left:17\.6\d%/.test(box.style.cssText) && box.firstChild.textContent === "Vehicle · gray suv" && box.style.cssText.includes("#4ea8ff"), "the box is drawn where the thing was at the moment now on screen, coloured and named by kind");
+  ok(!!box && /left:14\.2\d%/.test(box.style.cssText) && box.firstChild.textContent === "Vehicle · gray suv" && box.style.cssText.includes("#4ea8ff"), "the box is drawn where the thing was at the moment now on screen, coloured and named by kind");
   ok(!lt.els.has("9"), "something parked gets no box");
   ok(/left:0\.0px;top:0\.0px;width:1600\.0px;height:900\.0px/.test(layer.style.cssText), "the boxes lie over the picture");
   // what the browser really holds, once it says
   lt.statsAt = 0; pc.getStats = () => Promise.resolve(new Map([["v", { type: "inbound-rtp", kind: "video", jitterBufferDelay: 70 + 0.6 * 50, jitterBufferEmittedCount: 150 }]])); frameAt(T0 + 1500); await tick(); await tick();
-  ok(Math.abs(lt.jb - 600) < 1 && Math.abs(w._ltBehind(lt) - 850) < 1, "then the held-back time is the measured one");
+  ok(Math.abs(lt.jb - 600) < 1 && Math.abs(w._ltBehind(lt) - 1020) < 1, "then the held-back time is the measured one");
   // calibration
-  w._config.live_offset = 100; ok(Math.abs(w._ltBehind(lt) - 950) < 1, "live_offset draws the boxes that much later"); delete w._config.live_offset;
+  w._config.live_offset = 100; ok(Math.abs(w._ltBehind(lt) - 1120) < 1, "live_offset draws the boxes that much later"); delete w._config.live_offset;
   // talking: no delay
   w._talk = { live: true }; lt.statsAt = 0; frameAt(T0 + 1500); ok(recv.every((r) => r.jitterBufferTarget === null), "while talking the picture isn't held back"); w._talk = null; lt.statsAt = 0; frameAt(T0 + 1500);
   ok(recv.every((r) => r.jitterBufferTarget === 700), "and is again afterwards");
@@ -785,6 +787,43 @@ ok(w._built && !w._building, "next good config builds after a failure");
   bBtn.onclick(); await tick(); ok(!!w._lt, "on again");
   w._liveIndex = 1; w._showLive(); await tick(); ok(!w._lt && unsubs === 2 && bBtn.hidden === true, "another camera (one without boxes): stopped, the button gone");
   w._liveIndex = 0; w._showLive(); await tick(); ok(!!w._lt, "back: on again, as remembered"); w._closeLive(); ok(!w._lt && unsubs === 3, "closing the dialog stops it");
+  // the camera's main stream is less far behind than its second one
+  {
+    const m = new ctx.LiveTracks(); const real = Date.now;
+    const st = Object.assign(new El(), { querySelectorAll: () => [rtc, vid], isConnected: true, stateObj: { attributes: { channel_id: 0 } } });
+    ok(Math.abs(m.behind(st, {}) - (300 + 700)) < 1 && m.channel === 0, "the main stream: counted as less far behind");
+    st.stateObj = { attributes: { channel_id: 1 } }; m.statsAt = 0; ok(Math.abs(m.behind(st, {}) - (420 + 700)) < 1 && m.channel === 1, "the second stream: further");
+    // where the browser tells which frame is on screen: exactly, by the frame's own timestamp
+    let cb = null; const v2 = Object.assign(new El(), { tagName: "VIDEO", videoWidth: 1600, videoHeight: 900, requestVideoFrameCallback: (f) => { cb = f; return 1; } });
+    const st2 = Object.assign(new El(), { querySelectorAll: () => [rtc, v2], isConnected: true, stateObj: { attributes: { channel_id: 0 } } });
+    const x = new ctx.LiveTracks(); const C0 = 1_700_000_000_000; const S0 = 987_654_321; // the camera's wall clock and its stream clock (ms)
+    const NOW = real();
+    // our clock is 5 s ahead of the camera's; messages take 400 ms
+    const at = (ms, f) => { Date.now = () => NOW + ms; try { return f(); } finally { Date.now = real; } };
+    for (let k = 0; k <= 8; k++) at(k * 250, () => x.message({ clockWall: C0 - 5000 + NOW - NOW + k * 250 - 400, clockStream: S0 + k * 250 - 400, clockStreamRate: 1000, tracks: [{ id: "c", coord: [100 + k * 50, 400, 100, 50], objectType: "vehicle" }] }));
+    const cam = (ms) => C0 - 5000 + ms; // the camera's wall clock at our NOW + ms
+    ok(at(2000, () => x.behind(st2, {})) === 1000 && x.sync === "estimate" && typeof cb === "function", "frame timestamps: asked for; by estimate until one has come");
+    // a frame on screen at NOW+2000 whose timestamp is the stream clock of 900 ms earlier (wrapped as RTP is)
+    const rtpOf = (streamMs) => Math.round(streamMs * 90) % 2 ** 32;
+    at(2000, () => cb(0, { rtpTimestamp: rtpOf(S0 + 2000 - 900) }));
+    const b2 = at(2000, () => x.behind(st2, {})); const mom = at(2000, () => x.moment(b2));
+    ok(x.sync === "rtp" && Math.abs(mom - (cam(2000 - 900) - 180)) < 2, "a frame's timestamp: the moment on screen is that frame's (less what positions are stamped behind frames on the main stream), whatever the delays were: " + Math.round(mom - cam(1100)));
+    st2.stateObj = { attributes: { channel_id: 1 } }; x.statsAt = 0; const b3 = at(2000, () => x.behind(st2, {}));
+    ok(Math.abs(at(2000, () => x.moment(b3)) - (cam(1100) - 310)) < 2, "on the second stream: its own figure");
+    ok(Math.abs(at(2000, () => x.moment(x.behind(st2, { offset: 100 }))) - (cam(1100) - 410)) < 2, "live_offset still trims it");
+    ok(Math.abs(at(2030, () => x.moment(x.behind(st2, {}))) - (cam(1100) - 310)) < 2, "the same frame still on screen a little later: the same moment (the boxes go with the picture)");
+    ok(/webrtc · second stream · by frame timestamps · picture \d+ ms behind · held .* · frame \d+ ms older/.test(at(2000, () => x.describe(x.behind(st2, {})))), "it can say how it is timing: " + at(2000, () => x.describe(x.behind(st2, {}))));
+    // a timestamp that is some other clock: not believed
+    at(2000, () => cb(0, { rtpTimestamp: rtpOf(S0 + 2000 - 900 + 3_600_000) }));
+    ok(Math.abs(at(2000, () => x.behind(st2, {})) - 1120) < 1 && x.sync === "estimate" && /don't add up/.test(x.describe(0)), "frame timestamps on some other clock: not used, the estimate instead");
+    // no timestamp in what the browser tells, or the frames stop coming
+    at(2000, () => cb(0, {})); ok(at(2000, () => x.behind(st2, {})) === 1120 && x.sync === "estimate", "a browser that gives no frame timestamps: the estimate");
+    at(2000, () => cb(0, { rtpTimestamp: rtpOf(S0 + 2000 - 900) })); ok(at(2100, () => (x.behind(st2, {}), x.sync)) === "rtp" && at(4000, () => (x.behind(st2, {}), x.sync)) === "estimate", "no new frame for a while (the picture stopped): the estimate again");
+    // another player takes over: the old one is let go
+    const v3 = Object.assign(new El(), { tagName: "VIDEO", requestVideoFrameCallback: () => 1 }); const old = cb;
+    st2.querySelectorAll = () => [rtc, v3]; x.statsAt = 0; at(5000, () => x.behind(st2, {})); at(5000, () => old(0, { rtpTimestamp: 5 }));
+    ok(x.frame === null, "a new player: the old one's frames are no longer listened to");
+  }
   // HLS: the boxes wait for the picture
   const hl = new ctx.LiveTracks(); w._liveIndex = 0;
   w._liveStream = Object.assign(new El(), { querySelectorAll: () => [Object.assign(new El(), { tagName: "HA-HLS-PLAYER", _hlsPolyfillInstance: { latency: 4.2 } }), vid] });
@@ -834,11 +873,11 @@ ok(w._built && !w._building, "next good config builds after a failure");
   send(750, [tr("p1", "person", 520)]); send(1000, [tr("p1", "person", 540), tr("v1", "vehicle", 260)]); send(1250, [tr("p1", "person", 560)]);
   const a = c._active; Object.assign(frame, { clientWidth: 800, clientHeight: 450 });
   const frameAt = (ourMs, n = 1) => { const real = Date.now; Date.now = () => ourMs; try { for (let k = 0; k < n; k++) { a.view.at = a.view.at ? ourMs - 100 : 0; c._frame(a); } } finally { Date.now = real; } };
-  frameAt(T0 + 2300, 60); // on screen: about T0+2300-500+330-300(other player: no WebRTC here) = T0+1830 -> held at the last report? (1250+600 = 1850: yes)
+  frameAt(T0 + 2300, 60); // on screen: about T0+2300-500+330-300(other player: no WebRTC here) = T0+1830 -> 580 ms past the last report (1250): carried on as they were moving, 300 ms' worth
   const z = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\(([\d.]+)\)/.exec(root.querySelector(".zoomer").style.transform) || [];
   const mid = [(400 - z[1]) / z[3], (225 - z[2]) / z[3]];
   console.log("   view:", root.querySelector(".zoomer").style.transform, "middle", mid.map(Math.round).join());
-  ok(+z[3] > 2 && Math.abs(mid[0] - (0.56 + 0.03) * 800) < 12 && Math.abs(mid[1] - (0.3 + 0.08) * 450) < 12, "zoomed in on the person, who sits in the middle");
+  ok(+z[3] > 2 && Math.abs(mid[0] - (0.584 + 0.03) * 800) < 12 && Math.abs(mid[1] - (0.3 + 0.08) * 450) < 12, "zoomed in on the person, who sits in the middle");
   ok(a.els.size === 1 && a.els.has("p1") && a.els.get("p1").className === "box", "only the person is boxed");
   ok(root.querySelector(".info").children.map((x) => x.textAll).join("|") === "Person 91% · Porch, Lawn", "kind, how sure, and the zones by name (from Protect Zones)");
   // two people: both in view; tap one to stay on it
