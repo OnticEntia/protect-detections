@@ -28,9 +28,11 @@
  *                                           # (rings), scanline, or none (just the still)
  *   accent: "#e0102a"                       # the scanner's colour (default: the theme's
  *                                           # primary colour)
- *   warm: false                             # true: keep the camera's stream running
- *                                           # unseen, so the picture is there at once
- *                                           # (costs that stream all the time)
+ *   warm: false                             # true: the live picture while standing by
+ *                                           # too (dimmed, under the scanner), so it is
+ *                                           # there at once when someone appears. Costs
+ *                                           # that stream, and decoding it, all the time
+ *                                           # the card is on screen
  *   stream: auto                            # auto (the best stream at home, the light
  *                                           # one elsewhere) | high | low
  *   max_zoom: 4                             # how far it zooms in, at most
@@ -237,6 +239,14 @@ const STYLE = `
   .video > * { width: 100%; }
   .zoomer { transition: opacity .45s ease .15s; }
   .frame:not(.active) .zoomer { opacity: 0; pointer-events: none; transition: opacity .3s; }
+  /* warm: standing by, the stream that is running anyway is the picture
+     behind the scanner, dimmed as the still is, and the still is put away
+     (one picture at a time). It is fitted as when following (the whole
+     picture), so that going from one to the other moves nothing. With
+     standby: none it is the plain picture, not dimmed. */
+  .frame.warmlive:not(.active) .zoomer { opacity: .55; filter: saturate(.7); }
+  .frame.warmlive.s-none:not(.active) .zoomer { opacity: 1; filter: none; }
+  .frame.warmlive:not(.active) .snap { opacity: 0; visibility: hidden; transition: opacity .3s, visibility 0s .3s; }
   .boxes { position: absolute; pointer-events: none; }
   .box { position: absolute; box-sizing: border-box; border: calc(2px * var(--k, 1)) solid var(--c, #fff); border-radius: calc(3px * var(--k, 1));
     pointer-events: auto; }
@@ -253,6 +263,9 @@ const STYLE = `
   .idle small { font-size: 11px; opacity: .7; }
   .frame.s-none .idle { top: 0; align-items: center; justify-content: center; text-align: center; background: rgba(0,0,0,.35); padding: 12px; }
   .frame.s-none .idle ha-icon { display: block; --mdc-icon-size: 34px; opacity: .9; margin-bottom: 4px; }
+  .frame.warmlive.s-none .idle { top: auto; align-items: flex-start; justify-content: flex-start; text-align: left; padding: 22px 12px 9px;
+    background: linear-gradient(to top, rgba(0,0,0,.78), rgba(0,0,0,0)); }
+  .frame.warmlive.s-none .idle ha-icon { display: none; }
 
   /* standing by: the scanner. All of it moves by transform and opacity only,
      stops while the card can't be seen, and holds still for those who ask
@@ -692,6 +705,8 @@ class ProtectTrackingCard extends HTMLElement {
       const cam = cams[0];
       const entity = this._entity(cam);
       this._warm = { cam, entity, stream: this._stream(entity) };
+      // (looked at now and then: is its picture there, to stand in for the still?)
+      this._warmTimer = this._warmTimer || setInterval(() => this._warmCheck(), 1000);
     }
     this._snap();
     this._idle();
@@ -711,8 +726,23 @@ class ProtectTrackingCard extends HTMLElement {
       this._warm.stream.remove();
       this._warm = null;
     }
+    clearInterval(this._warmTimer);
+    this._warmTimer = null;
+    this._warmCheck();
     clearTimeout(this._snapTimer);
     this._snapTimer = null;
+  }
+
+  // warm: is the stream kept running showing a picture? Then it is what
+  // standing by shows; until it is, and whenever it isn't, the still is.
+  _warmCheck() {
+    const frame = this._root && this._root.querySelector(".frame");
+    if (!frame) return;
+    const warm = this._warm;
+    // (while another camera's picture is up, the warm stream is not in the card)
+    const mine = warm && (!this._active || this._active.stream === warm.stream);
+    const live = !!mine && deepFind(warm.stream, ["VIDEO"]).some((v) => !v.ended && v.readyState !== 0 && pictureBox(v));
+    frame.classList.toggle("warmlive", live);
   }
 
   _message(sub, msg) {
@@ -786,6 +816,7 @@ class ProtectTrackingCard extends HTMLElement {
     const take = () => {
       const cam = (this._active && this._active.sub.cam) || (this._cams || [])[0];
       if (!cam || !this._hass || this._active) return;
+      if (this._root && this._root.querySelector(".frame").classList.contains("warmlive")) return; // (the live picture is showing: no still needed)
       this._hass
         .callWS({ type: "auth/sign_path", path: `/api/camera_proxy/${cam.entity}`, expires: 60 })
         .then((r) => {
@@ -857,6 +888,7 @@ class ProtectTrackingCard extends HTMLElement {
       // (the stream kept warm goes back in its place, if another camera's took it)
       if (this._warm) root.querySelector(".video").replaceChildren(this._warm.stream);
     }
+    this._warmCheck();
     clearTimeout(this._lockTimer);
     root.querySelector(".frame").classList.remove("active", "lock", "playing");
     // (the reticle drifts back to the middle as the scanner fades in again)
@@ -1044,7 +1076,7 @@ const EDIT_FORM = [
   { name: "height", selector: { text: {} } },
 ];
 const EDIT_LABELS = { camera: "Camera (empty: every camera that recognises things)", name: "Name (empty: the camera's)", types: "Watch for", standby: "Standing-by look",
-  linger: "Stay after last seen", show_others: "Also box other things", warm: "Keep the stream running (instant picture)", height: "Height, e.g. 300px (empty: by shape)" };
+  linger: "Stay after last seen", show_others: "Also box other things", warm: "Live picture while standing by (keeps the stream running)", height: "Height, e.g. 300px (empty: by shape)" };
 const EDIT_STYLE = `
   :host { display: block; }
   .sound { margin-top: 20px; }

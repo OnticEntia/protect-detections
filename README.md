@@ -121,7 +121,7 @@ Watches every camera that recognises things and shows whichever one sees a perso
 | `standby` | `radar` | The standing-by look: `radar`, `pulse`, `scanline` or `none`. |
 | `accent` | the theme's primary colour | The scanner's colour. |
 | `snapshot` | `60` | Seconds between still pictures while standing by; `0` for none. |
-| `warm` | `false` | Keep the stream running unseen so the picture is instant. Uses that stream all the time. |
+| `warm` | `false` | `true`: the live picture while standing by too (see below), so it is there at once when someone appears. |
 | `stream` | `auto` | `auto` (best stream on the home network, lighter one elsewhere), `high` or `low`. |
 | `max_zoom` | `4` | How far it zooms in. |
 | `aspect_ratio` | `1.7778` | Width / height, where the view does not set the height. |
@@ -130,6 +130,8 @@ Watches every camera that recognises things and shows whichever one sees a perso
 | `sound` | `none` | A sound when it starts following: `ping` (a rising ping), `chirp` (a two-tone scanner chirp), `sweep` (a soft sweep) or `lock` (three blips and a tone). |
 | `sound_volume` | `0.5` | How loud, from `0` to `1`. |
 | `sound_gap` | `25` | Seconds the card stays quiet after it has sounded. |
+
+**Live picture while standing by (`warm`).** With `warm: true` the camera's stream runs all the time the card is on screen, and standing by shows that live picture, dimmed, under the scanner and the text, in place of the still. When someone appears the same picture brightens and zooms in: nothing is swapped. Until the stream has a picture, and if it loses it, the still is shown. With `standby: none` the live picture is shown plain, not dimmed. The live picture is always shown whole, so in a card that isn't the camera's shape it has bars where the still would fill the card. With several cameras the first one is the one kept running. What it costs: a constant stream from Home Assistant and continuous video decoding on the device, which on a phone or tablet means battery, heat and mobile data; off screen or in a background tab the stream stops, as before.
 
 **Sound.** The sounds are made in the browser (no sound files) and play on the device showing the dashboard. A sound plays once when the card goes from standing by to following, not for every report, and not again until the card has stood by again and `sound_gap` has passed. Several tracking cards waking at the same moment make one sound. Things to know:
 

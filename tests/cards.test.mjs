@@ -1092,6 +1092,53 @@ ok(w._built && !w._building, "next good config builds after a failure");
   delete win.AudioContext; S.ctx = null; e.setConfig({ sound: "chirp" }); click(e, "chirp"); ok(/can't make these sounds/.test(e._note.textAll), "a browser without Web Audio: said too");
   e.disconnectedCallback(); ctx.localStorage.store = {}; S.gesture = false; S.ctx = null; S.lastAt = 0;
 }
+// --- the tracking card, warm: the live picture while standing by
+{
+  ctx.document.hidden = false; ctx.localStorage.store = {};
+  const reg = { "camera.p_high_resolution_channel": { device_id: "d1", platform: "unifiprotect" }, "camera.q_high_resolution_channel": { device_id: "d2", platform: "unifiprotect" } };
+  const states = Object.fromEntries(Object.keys(reg).map((e) => [e, { entity_id: e, state: "recording", attributes: { channel_id: 0 } }]));
+  const P = "camera.p_high_resolution_channel", Q = "camera.q_high_resolution_channel";
+  const signed = [];
+  const mkc = async (cfg) => { const subs = new Map();
+    const h = { ...hass, entities: reg, states, devices: { d1: { name: "Front" }, d2: { name: "Back" } },
+      connection: { subscribeMessage: (cb, m) => { subs.set(m.entity, cb); return Promise.resolve(() => subs.delete(m.entity)); } },
+      callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { [P]: "p1", [Q]: "q1" } });
+        if (m.type === "auth/sign_path") { signed.push(m.path); return Promise.resolve({ path: "/s" }); } return new Promise(() => {}); } };
+    const c = new Trk(); c.setConfig(cfg); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick();
+    c.see = (ent, type = "person") => subs.get(ent)({ clockWall: Date.now() - 400, tracks: [{ id: type, coord: [400, 400, 60, 160], objectType: type }] }); return c; };
+  const picture = (stream, on = true) => { const v = Object.assign(new El(), { tagName: "VIDEO", videoWidth: on ? 1600 : 0, videoHeight: 900, readyState: on ? 4 : 0, getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 450 }) }); stream.querySelectorAll = () => [v]; return v; };
+  const has = (c, k) => c._root.querySelector(".frame").classList.contains(k);
+  let c = await mkc({ camera: P, warm: true });
+  const frame = c._root.querySelector(".frame"), video = c._root.querySelector(".video"), warm = c._warm.stream;
+  ok(video.children.length === 1 && video.children[0] === warm && !has(c, "warmlive") && c._root.querySelector(".snap").src === "/s", "warm: the stream is started; until it shows a picture, standing by shows the still");
+  const v = picture(warm, false); c._warmCheck(); ok(!has(c, "warmlive"), "a stream with no picture yet: still the still");
+  Object.assign(v, { videoWidth: 1600, readyState: 4 }); c._warmCheck();
+  ok(has(c, "warmlive") && !has(c, "active") && video.children[0] === warm, "its picture arrives: it becomes what standing by shows (the same element, nothing swapped)");
+  const n0 = signed.length; clearTimeout(c._snapTimer); c._snapTimer = null; c._snap(); ok(signed.length === n0, "and no more stills are fetched while it shows");
+  // someone appears: the same stream, the same element; the dimming goes
+  c.see(P); const a = c._active; Object.assign(frame, { clientWidth: 800, clientHeight: 450 }); a.placeAt = 0; a.view.at = 0; c._frame(a);
+  ok(a.stream === warm && video.children.length === 1 && video.children[0] === warm && has(c, "active") && has(c, "playing") && has(c, "warmlive"), "someone appears: following on the stream already there, no second one");
+  c._leave(); ok(!has(c, "active") && !has(c, "playing") && has(c, "warmlive") && video.children[0] === warm && !c._root.querySelector(".zoomer").style.transform, "gone: the dimmed live picture again, the zoom undone, the still not shown in between");
+  // the stream fails: the still again, and back when it returns
+  Object.assign(v, { videoWidth: 0, readyState: 0 }); c._warmCheck(); ok(!has(c, "warmlive"), "the stream loses its picture: the still stands in");
+  clearTimeout(c._snapTimer); c._snapTimer = null; c._snap(); ok(signed.length === n0 + 1, "and stills are fetched again");
+  Object.assign(v, { videoWidth: 1600, readyState: 4 }); c._warmCheck(); ok(has(c, "warmlive"), "back: live again");
+  // out of sight: the stream stops, as before
+  ctx.document.hidden = true; c._sync(); ok(!c._warm && !has(c, "warmlive"), "page hidden: the stream is stopped and nothing is marked as live"); ok(!has(c, "warmlive") && c._warmTimer === null, "(and nothing keeps checking)");
+  ctx.document.hidden = false; c._sync(); await tick(); ok(!!c._warm && !has(c, "warmlive"), "back in front: started again, the still until its picture is there");
+  c.disconnectedCallback(); ok(!c._warm && !has(c, "warmlive"), "taken off the page: stopped");
+  // not warm: as it was
+  c = await mkc({ camera: P }); c._warmCheck(); ok(!c._warm && !has(c, "warmlive") && c._root.querySelector(".video").children.length === 0 && !c._warmTimer, "warm off: no stream while standing by, the still as before"); c.disconnectedCallback();
+  // several cameras: the warm one is the first; another camera's picture takes its place and gives it back
+  c = await mkc({ warm: true }); const w2 = c._warm.stream; picture(w2); c._warmCheck(); ok(has(c, "warmlive"), "several cameras: the first one's stream is the standby picture");
+  const other = c._cams.find((x) => x.id !== c._warm.cam.id); c.see(other.entity); const a2 = c._active; picture(a2.stream); c._warmCheck();
+  ok(a2.stream !== w2 && c._root.querySelector(".video").children.length === 1 && c._root.querySelector(".video").children[0] === a2.stream && !has(c, "warmlive"), "another camera sees someone: its picture alone is in the card");
+  c._leave(); ok(c._root.querySelector(".video").children.length === 1 && c._root.querySelector(".video").children[0] === w2 && has(c, "warmlive"), "gone: the warm stream is back as the standby picture");
+  c.disconnectedCallback();
+  const css = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8");
+  ok(/\.frame\.warmlive:not\(\.active\) \.snap \{[^}]*visibility: hidden/.test(css) && /\.frame\.warmlive:not\(\.active\) \.zoomer \{ opacity: \.55/.test(css) && /\.frame\.warmlive\.s-none:not\(\.active\) \.zoomer \{ opacity: 1/.test(css), "live standing by: the still is put away and the picture dimmed (not dimmed with standby: none)");
+  ok(css.indexOf(".frame.warmlive.s-none .idle {") > css.indexOf(".frame.s-none .idle {"), "(the rule for standby: none comes after the one it changes)");
+}
 // --- tracking tiles on the wall
 {
   ctx.document.addEventListener ||= () => {}; ctx.document.removeEventListener ||= () => {}; ctx.document.hidden = false; ctx.localStorage.store = {};
