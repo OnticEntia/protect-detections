@@ -43,7 +43,9 @@
  *   live_offset: 0                          # ms to place the boxes later (+) / earlier (-)
  *   source: auto                            # whose positions: auto (the Protect Tracker
  *                                           # integration's when it is installed, else
- *                                           # Protect's own) | local | protect
+ *                                           # Protect's own) | local (what Protect
+ *                                           # Tracker's own model sees, whether or not
+ *                                           # Protect reports it) | protect
  *   box_style: reticle                      # how the followed thing is marked: reticle
  *                                           # (the scanner's own brackets close onto it,
  *                                           # follow it and let it go) | plain (a box)
@@ -93,7 +95,9 @@
  *            it as the picture comes up (with the sound, if one is set)
  *   track    the brackets follow it, a tag on them saying what it is, how
  *            sure, and where (zones). Solid edges for a box made on this
- *            machine, dashed for one of UniFi Protect's; dimmer when it
+ *            machine, dashed for one of UniFi Protect's, dotted for one
+ *            only Protect Tracker has seen so far (its local mode: Protect
+ *            hasn't reported it); dimmer when it
  *            stands still; breathing gently on a sure one. A face found on
  *            it is a small bracket set; other moving things of a watched
  *            kind are faint brackets in their kind's colour
@@ -345,6 +349,9 @@ const STYLE = `
   /* thin edges between the brackets: solid for a box made here, dashed for one of Protect's */
   .bs-reticle .box::after { content: ""; position: absolute; inset: 0; border: calc(1px * var(--k, 1)) solid color-mix(in srgb, var(--bc) 32%, transparent); }
   .bs-reticle .box.passed::after { border-style: dashed; }
+  /* seen by the local model only so far (Protect hasn't reported it): dotted edges, lighter brackets; confirmed: as usual */
+  .bs-reticle .box.seen::after { border-style: dotted; }
+  .bs-reticle .box.seen { --bt: calc(1.5px * var(--k, 1)); }
   .bs-reticle .box.still::before { opacity: .55; }
   .bs-reticle .box.main.sure:not(.still):not(.lostb)::before { animation: trk-breathe 2.8s ease-in-out infinite; }
   .bs-reticle .box.main.acq::before { animation: trk-close .38s cubic-bezier(.2,.9,.25,1.1) 1 both; }
@@ -1009,7 +1016,12 @@ class ProtectTrackingCard extends HTMLElement {
         (st) => {
           if (!mine()) return;
           sub.using = st.using;
-          if (st.using) {
+          sub.lt.mode = st.mode || null;
+          if (st.using && this._config.source === "local" && st.mode !== "local") {
+            // a Protect Tracker from before its local mode: what its model made, out of its mixed feed
+            this._note = "This Protect Tracker has no local mode yet: going by its model's boxes from the mixed feed";
+            this._srcNote = true;
+          } else if (st.using) {
             if (this._srcNote) this._note = "";
             this._srcNote = false;
           } else if (this._config.source === "local") {
@@ -1079,9 +1091,9 @@ class ProtectTrackingCard extends HTMLElement {
     // (whether it is moving is the positions' own judgement as well as the report's: see protect-live.js)
     const moves = (tr) => {
       const t = sub.lt.tracks.get(tr.id);
-      return !!t && Number.isFinite(msg.clockWall) && msg.clockWall - t.moved <= 400;
+      return !!t && sub.lt.latest != null && sub.lt.latest - t.moved <= 400;
     };
-    const hit = own.find((tr) => types.includes(tr.objectType) && !tr.stationary && moves(tr) && (!only || tr.local === true));
+    const hit = own.find((tr) => types.includes(tr.objectType) && !tr.stationary && tr.moving !== false && moves(tr) && (!only || tr.local === true));
     const now = Date.now();
     if (!hit) {
       // (messages can come thirty a second: the dots needn't)
@@ -1450,7 +1462,9 @@ class ProtectTrackingCard extends HTMLElement {
         const sure = Number(t.confidence) >= 80;
         const still = at - t.moved > MOVING_MS;
         const passed = a.sub.using === "tracker" && !t.local;
-        el.className = `box main${sure ? " sure" : ""}${still ? " still" : ""}${passed ? " passed" : ""}${now < (a.hopUntil || 0) ? " hop" : ""}${now < (a.acqUntil || 0) ? " acq" : ""}`;
+        // (Protect Tracker's local mode: seen by its model only so far, or reported by Protect too)
+        const seen = t.confirmed === false;
+        el.className = `box main${sure ? " sure" : ""}${still ? " still" : ""}${passed ? " passed" : ""}${seen ? " seen" : ""}${now < (a.hopUntil || 0) ? " hop" : ""}${now < (a.acqUntil || 0) ? " acq" : ""}`;
         el.style.cssText = `left:${(box[0] / 10).toFixed(2)}%;top:${(box[1] / 10).toFixed(2)}%;width:${(box[2] / 10).toFixed(2)}%;height:${(box[3] / 10).toFixed(2)}%;--c:${LIVE_COLORS[t.type] || "#e5e7eb"}`;
         // its tag: what it is, how sure, where
         const names = (this._zones && this._zones[a.sub.cam.id]) || {};

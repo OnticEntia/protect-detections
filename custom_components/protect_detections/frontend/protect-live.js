@@ -75,13 +75,19 @@ const LIVE_PACE_MS = 400; // how a thing is moving is taken from its reports of 
 //  - "auto": Protect Tracker when it is installed, else Protect's.
 export const LIVE_SOURCES = ["auto", "local", "protect"];
 const LIVE_TYPES = { tracker: "protect_tracker/live/subscribe", protect: "protect_detections/live/subscribe" };
+// "local" asks Protect Tracker for its local mode: what its own model sees,
+// under its own ids, whether or not Protect has reported it (a thing Protect
+// has reported too comes marked `confirmed`). A Protect Tracker from before
+// that mode refuses the request; its ordinary feed is then used, showing
+// only what its model made (the state says so: `mode: "auto"`).
 const LIVE_RETRY_MS = 120000; // auto, without Protect Tracker: looked for again this often
 
 /**
  * Listens to a camera's positions from the source asked for.
  *   onMessage(msg)   every message (positions, or a status)
- *   onState(state)   {using: "tracker" | "protect" | null, error, code}
- *                    whenever what is listened to changes or fails
+ *   onState(state)   {using: "tracker" | "protect" | null, mode, error, code}
+ *                    whenever what is listened to changes or fails; `mode`
+ *                    is Protect Tracker's: "local" or "auto"
  * Returns a function that stops it. With "auto", Protect Tracker is tried
  * first and Protect's own is used while it isn't there; it is looked for
  * again now and then, and when the connection to Home Assistant comes back
@@ -102,19 +108,28 @@ export function subscribeLive(hass, entity, source, onMessage, onState = () => {
       } catch (e) {}
     }
   };
-  const listen = (which) => {
-    const sub = { which, unsub: null, dead: false };
-    return Promise.resolve(conn.subscribeMessage((msg) => !stopped && current === sub && onMessage(msg), { type: LIVE_TYPES[which], entity })).then((unsub) => {
+  const listen = (which, mode) => {
+    const sub = { which, mode: which === "tracker" ? mode || "auto" : null, unsub: null };
+    const ask = { type: LIVE_TYPES[which], entity, ...(sub.mode === "local" ? { mode: "local" } : {}) };
+    return Promise.resolve(conn.subscribeMessage((msg) => !stopped && current === sub && onMessage(msg), ask)).then((unsub) => {
       sub.unsub = unsub;
       return sub;
     });
   };
+  // Protect Tracker, in the mode wanted: local where it has it
+  const tracker = () =>
+    want !== "local"
+      ? listen("tracker")
+      : listen("tracker", "local").catch((err) => {
+          if (stopped || !err || err.code === "unknown_command") throw err;
+          return listen("tracker"); // (one from before the local mode: it refuses the extra word)
+        });
   const use = (sub) => {
     if (stopped) return drop(sub);
     const old = current;
     current = sub;
     drop(old);
-    onState({ using: sub.which });
+    onState({ using: sub.which, mode: sub.mode });
   };
   const again = () => {
     clearTimeout(timer);
@@ -124,8 +139,7 @@ export function subscribeLive(hass, entity, source, onMessage, onState = () => {
   function start() {
     if (stopped || trying) return;
     trying = true;
-    const first = want === "protect" ? "protect" : "tracker";
-    listen(first)
+    (want === "protect" ? listen("protect") : tracker())
       .then(
         (sub) => use(sub),
         (err) => {
@@ -215,7 +229,9 @@ export class LiveTracks {
     this.kind = null; // "webrtc" | "hls" | "other"
     this.can = false; // can this player hold the picture back
     this.hls = null;
-    this.clock = null; // the newest message's clocks: {wall, stream (ms), at (ours)}
+    this.clock = null; // the newest message's stream clock: {stream (ms), at (ours)}
+    this.K = null; // the camera's wall clock less its stream clock, as first told
+    this.latest = null; // the moment of the newest message
     this.frame = null; // the frame on screen, where the browser tells: {rtp, at (ours)}
     this.sync = "estimate"; // or "rtp": how the moment on screen was found
     this.lag = null; // (rtp) the frame on screen is this far behind the newest positions
@@ -233,60 +249,76 @@ export class LiveTracks {
     const local = msg.source === "local";
     if (local || msg.source === "protect") this.said = true;
     if (local) this.localAt = now;
+    // The moment the positions are for. Messages carry the camera's wall
+    // clock and its stream clock; the stream clock is the one frames are
+    // matched by, and the true one (a sender may have to guess the wall
+    // clock at first and correct it later). So positions are kept by the
+    // stream clock, set against the wall clock once: a correction of the wall
+    // clock then moves nothing. (A stream clock that starts over, as after a
+    // camera restart, is taken up afresh.)
+    const rate = Number(msg.clockStreamRate) || 1000;
+    const stream = Number.isFinite(msg.clockStream) ? (msg.clockStream * 1000) / rate : null;
+    if (stream != null && (this.K == null || Math.abs(msg.clockWall - stream - this.K) > 5000)) {
+      if (this.K != null) this.tracks.clear();
+      this.K = msg.clockWall - stream;
+    }
+    const at = stream != null ? stream + this.K : msg.clockWall;
+    this.latest = at;
     // Our clock against the camera's: from the quickest message of the last
     // half minute. Protect's own take a third of a second at best; Protect
     // Tracker's are here at once, so each make is counted for itself and
     // Protect's is gone by while there are any.
     const mine = this.quick[local ? "local" : "protect"];
     const sec = Math.floor(now / 1000);
-    const took = now - msg.clockWall;
+    const took = now - at;
     if (!mine.has(sec) || took < mine.get(sec)) mine.set(sec, took);
     for (const list of [this.quick.protect, this.quick.local]) for (const k of list.keys()) if (k < sec - LIVE_GAP_KEEP_S) list.delete(k);
     this.gap = this.quick.protect.size ? Math.min(...this.quick.protect.values()) : Math.min(...this.quick.local.values()) - LIVE_LOCAL_TRANSIT_MS + LIVE_TRANSIT_MS;
     // (the newest stamp only: Protect's messages come later than Protect Tracker's, with older ones)
-    const rate = Number(msg.clockStreamRate) || 1000;
-    if (Number.isFinite(msg.clockStream) && (!this.clock || msg.clockWall - now >= this.clock.wall - this.clock.at - 50)) {
-      this.clock = { wall: msg.clockWall, stream: (msg.clockStream * 1000) / rate, at: now };
-    }
+    if (stream != null && (!this.clock || stream - now >= this.clock.stream - this.clock.at - 50)) this.clock = { stream, at: now };
     for (const tr of msg.tracks || []) {
       if (!tr || !Array.isArray(tr.coord) || tr.coord.length !== 4) continue;
       let t = this.tracks.get(tr.id);
       if (!t) {
         // (there from the start, or come into view since: see LIVE_YOUNG_MS)
         const fresh = now - this.began >= LiveTracks.SETTLE_MS;
-        this.tracks.set(tr.id, (t = { id: tr.id, type: tr.objectType || "object", desc: "", pts: [], moved: 0, went: 0, first: msg.clockWall, fresh, rest: null }));
+        this.tracks.set(tr.id, (t = { id: tr.id, type: tr.objectType || "object", desc: "", pts: [], moved: 0, went: 0, first: at, fresh, rest: null }));
       }
       if (tr.objectType) t.type = tr.objectType;
       if (tr.desc) t.desc = tr.desc;
       // made by Protect Tracker's own model (Protect's own reports of the same thing come in between: it stays so)
-      if (tr.local === true) t.localAt = msg.clockWall;
-      t.local = t.localAt != null && msg.clockWall - t.localAt < LIVE_SOURCE_MS;
+      if (tr.local === true) t.localAt = at;
+      t.local = t.localAt != null && at - t.localAt < LIVE_SOURCE_MS;
       // (a face found on someone being followed belongs to that someone: `of` is their id)
       t.of = tr.of != null && tr.of !== "" ? String(tr.of) : null;
       if (Number.isFinite(tr.confidence)) t.confidence = tr.confidence;
+      // (Protect Tracker's local mode: has Protect reported it too? Unsaid elsewhere)
+      if (typeof tr.confirmed === "boolean") t.confirmed = tr.confirmed;
       for (const key of ["zones", "loiterZones", "lines"]) if (Array.isArray(tr[key])) t[key] = tr[key];
       const last = t.pts[t.pts.length - 1];
-      if (last && last[0] >= msg.clockWall) continue;
+      if (last && last[0] >= at) continue;
       // (while the local model has a thing, Protect's own box for it is left
       // aside: the two differ a little, and the box would hop between them)
-      if (tr.local !== true && t.localAt != null && Math.abs(msg.clockWall - t.localAt) < LIVE_LOCAL_HOLD_MS) continue;
+      if (tr.local !== true && t.localAt != null && Math.abs(at - t.localAt) < LIVE_LOCAL_HOLD_MS) continue;
       const c = tr.coord.map(Number);
-      t.pts.push([msg.clockWall, ...c]);
+      t.pts.push([at, ...c]);
       // moved, as measured: further than a wobble from where it last rested
       const mid = [c[0] + c[2] / 2, c[1] + c[3] / 2];
       const step = Math.max(10, 0.12 * Math.min(c[2], c[3]));
       if (!t.rest) t.rest = mid;
       else if (Math.abs(mid[0] - t.rest[0]) >= step || Math.abs(mid[1] - t.rest[1]) >= step) {
         t.rest = mid;
-        t.went = msg.clockWall;
+        t.went = at;
       }
       // moving: measured so, or said so by a thing only just come into view
-      const young = t.fresh && msg.clockWall - t.first <= LIVE_YOUNG_MS;
-      if ((t.went === msg.clockWall || (young && !tr.stationary)) && msg.clockWall > t.moved) t.moved = msg.clockWall;
-      while (t.pts.length > 2 && t.pts[0][0] < msg.clockWall - LIVE_KEEP_MS) t.pts.shift();
+      const young = t.fresh && at - t.first <= LIVE_YOUNG_MS;
+      // (`moving`: a sender's own view, where it gives one; `stationary`: Protect's word)
+      const said = !tr.stationary && tr.moving !== false;
+      if (((t.went === at && tr.moving !== false) || (young && said)) && at > t.moved) t.moved = at;
+      while (t.pts.length > 2 && t.pts[0][0] < at - LIVE_KEEP_MS) t.pts.shift();
     }
     for (const [id, t] of this.tracks) {
-      if (t.pts[t.pts.length - 1][0] < msg.clockWall - LIVE_KEEP_MS) this.tracks.delete(id);
+      if (t.pts[t.pts.length - 1][0] < at - LIVE_KEEP_MS) this.tracks.delete(id);
     }
   }
 
@@ -325,7 +357,8 @@ export class LiveTracks {
         vy = (mean(i - half + 1, 2) - mean(j, 2)) / dt;
       } else {
         const p = pts[i - 1];
-        if (!p || a[0] - p[0] > 600 || a[0] <= p[0]) return a.slice(1);
+        // (two reports a few ms apart tell nothing of its pace: it stays where it is)
+        if (!p || a[0] - p[0] > 600 || a[0] - p[0] < 30) return a.slice(1);
         vx = (a[1] - p[1]) / (a[0] - p[0]);
         vy = (a[2] - p[2]) / (a[0] - p[0]);
       }
@@ -408,7 +441,7 @@ export class LiveTracks {
     const lag = about - stream;
     if (lag < -1500 || lag > 8000) return null;
     this.lag = lag;
-    return stream + (c.wall - c.stream);
+    return stream + (this.K || 0);
   }
 
   // ---- live_debug: the timing checked against the picture.
@@ -544,6 +577,7 @@ export class LiveTracks {
     const n = (v) => (v == null || !Number.isFinite(v) ? "?" : String(Math.round(v)));
     return [
       this.source ? `boxes: ${this.source === "local" ? "local (Protect Tracker)" : "Protect's"}` : "",
+      this.mode ? `tracker mode: ${this.mode}` : "",
       this.kind || "?",
       this.channel === 0 ? "main stream" : "second stream",
       this.sync === "rtp" ? "by frame timestamps" : "by estimate",

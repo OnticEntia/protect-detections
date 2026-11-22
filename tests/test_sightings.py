@@ -197,6 +197,14 @@ log.feed("cam1", msg(T + 1400, [tr("V9", "vehicle")]))
 snap = log.snapshot(now=T + 1500)
 ok(len(snap["sightings"]) == 1 and snap["sightings"][0]["type"] == "vehicle" and snap["sightings"][0]["attached"] is True and snap["sightings"][0]["desc"] == "white car" and snap["sightings"][0]["start"] == T, "seen by the tracker first, Protect's details attached in flight (its kind changing with them): still the one sighting, from the tracker's first sight of it")
 
+# the field names as the tracker sends them: protectId, confirmed
+log = SightingLog()
+log.feed("cam1", lmsg([{"id": "L7k2-41", "coord": [1, 2, 3, 4], "objectType": "person", "confirmed": False, "moving": True, "local": True}]), now=T, source="local")
+ok(log.snapshot(now=T + 10)["sightings"][0]["attached"] is False, "confirmed: false is 'not attached'")
+log.feed("cam1", lmsg([{"id": "L7k2-41", "coord": [1, 2, 3, 4], "objectType": "person", "confirmed": True, "protectId": "P5", "local": True}], eventId="ev9"), now=T + 100, source="local")
+row = log.snapshot(now=T + 200)["sightings"][0]
+ok(row["attached"] is True and row["protect_id"] == "P5" and row["events"] == ["ev9"] and row["track"] == "L7k2-41", "confirmed: true with protectId: attached, with Protect's id and the packet's event id")
+
 # a Protect sighting that had just closed when the local one attached
 log = SightingLog()
 log.feed("cam1", msg(T, [tr("P1", "person")]))

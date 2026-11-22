@@ -343,6 +343,7 @@ const LIVE_STYLE = `
   .frame.zoomed { cursor: grab; touch-action: none; }
   /* what the camera is tracking, live */
   .lbox-it.passed { border-style: dashed; }
+  .lbox-it.seen { border-style: dotted; }
   button.chip.lsrc { padding-left: 10px; padding-right: 10px; opacity: .85; }
   button.chip.lsrc.warn { color: var(--warning-color, #fbbf24); }
   .lboxes { position: absolute; pointer-events: none; }
@@ -2988,6 +2989,7 @@ class CameraWallCard extends HTMLElement {
         (st) => {
           if (this._lt !== lt) return;
           lt.using = st.using;
+          lt.mode = st.mode || null;
           lt.missing = !st.using;
           if (st.using === "tracker") {
             try {
@@ -3055,10 +3057,13 @@ class CameraWallCard extends HTMLElement {
     if (!show) return;
     const src = lt.src;
     let text = LIVE_SOURCE_NAMES[src];
-    let title = { auto: "Boxes: Protect Tracker's where it has them, UniFi Protect's otherwise (dashed). Click for only the local ones", local: "Boxes: only what Protect Tracker's own model made. Click for only UniFi Protect's", protect: "Boxes: only UniFi Protect's own. Click for the best of both" }[src];
+    let title = { auto: "Boxes: Protect Tracker's where it has them, UniFi Protect's otherwise (dashed). Click for only the local ones", local: "Boxes: what Protect Tracker's own model sees, whether or not UniFi Protect reports it (dotted until it does). Click for only UniFi Protect's", protect: "Boxes: only UniFi Protect's own. Click for the best of both" }[src];
     if (src === "local" && lt.missing) {
       text += " · not installed";
       title = "Protect Tracker isn't answering, so there are no local boxes. Click for UniFi Protect's";
+    } else if (src === "local" && lt.using === "tracker" && lt.mode !== "local") {
+      text += " · older tracker";
+      title = "This Protect Tracker has no local mode yet: these are its model's boxes out of its mixed feed. Click for UniFi Protect's";
     } else if (src === "local" && lt.idle) {
       text += " · nothing now";
       title = "Protect Tracker's model has nothing in view right now (UniFi Protect does). Click for UniFi Protect's";
@@ -3143,6 +3148,8 @@ class CameraWallCard extends HTMLElement {
         el.classList.toggle("part", of != null);
         // (Auto, with Protect Tracker: a box that is Protect's own, passed on, is dashed)
         el.classList.toggle("passed", lt.using === "tracker" && lt.src !== "protect" && of == null && !t.local);
+        // (local mode: seen by the model only so far; Protect hasn't reported it)
+        el.classList.toggle("seen", t.confirmed === false && of == null);
         if (el.firstChild.textContent !== label) el.firstChild.textContent = label;
         el.style.cssText = `left:${(box[0] / 10).toFixed(2)}%;top:${(box[1] / 10).toFixed(2)}%;width:${(box[2] / 10).toFixed(2)}%;height:${(box[3] / 10).toFixed(2)}%;--c:${LIVE_COLORS[t.type] || "#e5e7eb"}`;
         el.firstChild.classList.toggle("below", box[1] < 60);

@@ -1343,6 +1343,80 @@ ok(w._built && !w._building, "next good config builds after a failure");
   change(e, { history: false }); ok(e.out[1].history === false, "switching History off replaces the list with false (said so by the switch)");
   ctx.localStorage.store = {};
 }
+// --- Protect Tracker's local mode
+{
+  ctx.localStorage.store = {};
+  const TR = "protect_tracker/live/subscribe", PR = "protect_detections/live/subscribe";
+  const realTimeout = ctx.setTimeout; ctx.setTimeout = (f, ms) => (ms >= 100000 ? { held: true } : realTimeout(f, ms));
+  // a connection whose Protect Tracker is `kind`: "new" (knows mode), "old" (refuses the extra word), or absent
+  const mkConn = (kind) => { const c = { asked: [], open: new Map(),
+    subscribeMessage(cb, m) { if (!m.type.endsWith("/live/subscribe")) return Promise.resolve(() => {}); c.asked.push(m.type === TR ? "tracker" + (m.mode ? ":" + m.mode : "") : "protect");
+      if (m.type === TR && !kind) return Promise.reject({ code: "unknown_command" });
+      if (m.type === TR && kind === "old" && "mode" in m) return Promise.reject({ code: "invalid_format", message: "extra keys not allowed @ data['mode']" });
+      c.open.set(m.type, cb); c.mode = m.mode || null; return Promise.resolve(() => c.open.delete(m.type)); } }; return c; };
+  const run = async (kind, source) => { const conn = mkConn(kind); const states = []; const stop = ctx.subscribeLive({ connection: conn }, "camera.x", source, () => {}, (st) => states.push(`${st.using}/${st.mode || "-"}${st.code ? ":" + st.code : ""}`)); await tick(); await tick(); return { conn, states, stop }; };
+  let r = await run("new", "local"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "tracker/local", "source local: Protect Tracker is asked for its local mode"); r.stop();
+  r = await run("old", "local"); ok(r.conn.asked.join() === "tracker:local,tracker" && r.states.join() === "tracker/auto" && r.conn.mode === null, "a Protect Tracker from before that mode refuses the word: its ordinary feed is used, and the state says which"); r.stop();
+  r = await run(null, "local"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "null/-:unknown_command", "no Protect Tracker at all: said so (not tried a second way, not Protect's instead)"); r.stop();
+  r = await run("new", "auto"); ok(r.conn.asked.join() === "tracker" && r.states.join() === "tracker/auto", "source auto: its ordinary mode, no word added"); r.stop();
+  r = await run("new", "protect"); ok(r.conn.asked.join() === "protect" && r.states.join() === "protect/-", "source protect: not asked at all"); r.stop();
+
+  // --- the clocks: positions go by the stream clock, so a corrected wall clock moves nothing
+  const B = 1_700_000_300_000, S = 55_000_000; const real = Date.now;
+  const lt = new ctx.LiveTracks(); const pos = (ms) => 100 + ms * 0.2;
+  const pkt = (ms, wallOff, extra = {}) => ({ clockWall: B + ms + wallOff, clockStream: S + ms, clockStreamRate: 1000, source: "local", tracks: [{ id: "L1", coord: [pos(ms), 300, 60, 160], objectType: "person", local: true, confirmed: false, moving: true, stationary: false, ...extra }] });
+  let worst = 0; let prev = null;
+  for (let ms = 0; ms <= 3000; ms += 33) {
+    Date.now = () => B + ms + 7000; lt.message(pkt(ms, ms < 1500 ? 0 : 640)); // Protect's first report arrives at 1.5 s: the wall clock is put right by 640 ms
+    const box = ctx.LiveTracks.at(lt.tracks.get("L1"), lt.latest - 200); if (box && prev != null) worst = Math.max(worst, Math.abs(box[0] - prev - 0.2 * 33)); if (box) prev = box[0];
+  }
+  Date.now = real;
+  ok(worst < 0.5 && lt.tracks.get("L1").pts.length > 85, `the sender puts its wall clock right by 640 ms in mid flight: the positions carry on evenly, none dropped (furthest from an even pace: ${worst.toFixed(2)} units)`);
+  ok(lt.tracks.get("L1").confirmed === false && lt.tracks.get("L1").local === true, "seen by the model only (not confirmed): kept per thing");
+  Date.now = () => B + 3100 + 7000; lt.message(pkt(3100, 640, { confirmed: true, protectId: "P1", desc: "red" })); Date.now = real;
+  ok(lt.tracks.get("L1").confirmed === true && lt.tracks.get("L1").desc === "red" && lt.tracks.size === 1, "Protect's details attached in flight: the same thing, now confirmed");
+  // the stream clock starting over (the camera restarted): taken up afresh, nothing stuck
+  Date.now = () => B + 60000 + 7000; lt.message({ clockWall: B + 60000, clockStream: 500, clockStreamRate: 1000, source: "local", tracks: [{ id: "L2", coord: [10, 10, 50, 50], objectType: "person", local: true }] }); Date.now = real;
+  ok(lt.tracks.size === 1 && lt.tracks.has("L2") && lt.tracks.get("L2").pts.length === 1, "the stream clock starts over: what was held is let go and the new positions are taken");
+  // the engine's own view of moving
+  const mv = new ctx.LiveTracks(); ctx.LiveTracks.SETTLE_MS = -Infinity;
+  mv.message({ clockWall: B, tracks: [{ id: "a", coord: [1, 1, 50, 50], objectType: "person", stationary: false, moving: false }, { id: "b", coord: [200, 1, 50, 50], objectType: "person", stationary: false, moving: true }, { id: "c", coord: [400, 1, 50, 50], objectType: "person", stationary: false }] });
+  ok(mv.tracks.get("a").moved === 0 && mv.tracks.get("b").moved === B && mv.tracks.get("c").moved === B, "a sender's own 'not moving' is believed over 'not stationary'; unsaid, it is as before");
+
+  // --- the tracking card in local mode
+  const P = "camera.p_high_resolution_channel";
+  const mkc = async (cfg, kind) => { const conn = mkConn(kind);
+    const h = { ...hass, entities: { [P]: { device_id: "d1", platform: "unifiprotect" } }, states: { [P]: { entity_id: P, state: "recording", attributes: { channel_id: 0 } } }, devices: { d1: { name: "Front" } }, connection: conn,
+      callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { [P]: "p1" } }); if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
+    const c = new Trk(); c.setConfig(cfg); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick(); c.conn = conn; Object.assign(c._root.querySelector(".frame"), { clientWidth: 1000, clientHeight: 562 }); return c; };
+  const note = (c) => c._root.querySelector(".idle .note").textContent;
+  let c = await mkc({ source: "local" }, "new");
+  ok(c.conn.asked.join() === "tracker:local" && note(c) === "", "tracking card, source local: asks for the local mode; nothing to say");
+  // (each report 100 ms after the one before, on a clock of the test's own; the frame half a second on, as the picture runs behind the positions)
+  let seeN = 0; const see0 = Date.now();
+  const see = (c2, tr) => { const realNow = Date.now; const t = see0 + ++seeN * 100; try { Date.now = () => t; c2.conn.open.get(TR)({ clockWall: t - 20, clockStream: 777000 + seeN * 100, clockStreamRate: 1000, source: "local", tracks: [tr] }); Date.now = () => t + 500; if (c2._active) { c2._active.placeAt = 0; c2._frame(c2._active); } } finally { Date.now = realNow; } };
+  see(c, { id: "L9", coord: [400, 300, 60, 160], objectType: "person", local: true, confirmed: false, moving: true, stationary: false, confidence: 72, desc: "", zones: [] });
+  ok(!!c._active && c._active.subject === "L9" && c._active.mainEl.className.includes("seen") && c._active.mainEl.firstChild.textContent === "Person 72%", "someone only the model has seen, with no details from Protect: woken, followed, marked as seen-only, the tag saying what it can: " + [c._active && c._active.subject, c._active && c._active.mainEl && c._active.mainEl.className, c._active && c._active.mainEl && c._active.mainEl.firstChild.textContent].join(" | "));
+  see(c, { id: "L9", coord: [404, 300, 60, 160], objectType: "person", local: true, confirmed: true, protectId: "P3", moving: true, stationary: false, confidence: 91, desc: "blue" });
+  ok(c._active.subject === "L9" && !c._active.mainEl.className.includes("seen") && c._active.mainEl.firstChild.textContent === "Person · blue 91%", "Protect reports them too: the same subject, now confirmed, the tag with Protect's details: " + [c._active.subject, c._active.mainEl.className, c._active.mainEl.firstChild.textContent].join(" | "));
+  c.disconnectedCallback();
+  c = await mkc({ source: "local" }, null); const ltx = new ctx.LiveTracks(); ok(/isn't installed/.test(note(c)), "(no Protect Tracker: said, as before)"); c.disconnectedCallback();
+  c = await mkc({ source: "local", types: ["person"] }, "new");
+  see(c, { id: "L5", coord: [400, 300, 60, 160], objectType: "person", local: true, confirmed: false, moving: false, stationary: false });
+  ok(!c._active, "something the engine itself says is not moving doesn't wake the card, whatever 'stationary' says"); c.disconnectedCallback();
+  c = await mkc({ source: "local" }, "old");
+  ok(/no local mode yet/.test(note(c)) && c.conn.open.has(TR) && !c._state, "an older Protect Tracker: the card says its local mode isn't there yet, and goes by the model's boxes from the mixed feed");
+  c.disconnectedCallback();
+
+  // --- the wall's chip
+  const mkw = async (kind) => { const conn = mkConn(kind); const w = new Wall(); w.clientWidth = 1000; w.isConnected = true;
+    w.setConfig({ cameras: [{ entity: "camera.a", name: "A" }], alarm: false, history: false, arrange: false, tracking: false, source: "local" });
+    w.hass = { ...hass, entities: {}, devices: {}, connection: conn, callWS: (m) => (m.type === "network/url" ? Promise.resolve({}) : m.type.endsWith("/live/cameras") ? Promise.resolve({ cameras: { "camera.a": "p1" } }) : new Promise(() => {})) };
+    await tick(); await tick(); await tick(); w._openLive(0); await tick(); await tick(); ctx.localStorage.store["camera-wall-card:live-boxes"] = "1"; w._ltSync(); await tick(); await tick(); w.conn = conn; return w; };
+  let w = await mkw("new"); ok(w.conn.asked.join() === "tracker:local" && w._liveRoot.querySelector(".lsrc").textContent === "Local" && w._lt.mode === "local", "the live view on Local: the local mode is asked for, the chip says Local"); w._closeLive(); w.disconnectedCallback();
+  w = await mkw("old"); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local · older tracker" && w._liveRoot.querySelector(".lsrc").classList.contains("warn") === false, "with an older Protect Tracker the chip says so"); w._closeLive(); w.disconnectedCallback();
+  ctx.setTimeout = realTimeout; ctx.localStorage.store = {};
+}
 // --- the tracking card's "Last seen", from the integration's record
 {
   ctx.document.hidden = false; ctx.localStorage.store = {};

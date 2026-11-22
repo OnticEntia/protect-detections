@@ -131,13 +131,15 @@ class SightingLog:
                     "zones": [], "loiter_zones": [], "lines": [], "events": [], "edges": [],
                     "source": "local" if local else "protect", "attached": False, "protect_id": None,
                 }
-            if local and pid is not None and (tr.get("attached") is not False):
+            # (attached: Protect has reported it too. Said as `confirmed`, or as `attached`; a Protect id alone says it as well)
+            said = tr.get("confirmed", tr.get("attached"))
+            if local and pid is not None and said is not False:
                 if cur["protect_id"] != pid:
                     cur["protect_id"] = pid
                     self._absorb(camera, pid, key)
                 cur["attached"] = True
                 self.claimed[(camera, pid)] = key
-            elif local and tr.get("attached") is True:
+            elif local and said is True:
                 cur["attached"] = True
             self._note(cur, tr, payload, at, kind, camera)
 
