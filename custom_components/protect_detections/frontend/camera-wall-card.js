@@ -2991,6 +2991,7 @@ class CameraWallCard extends HTMLElement {
           lt.using = st.using;
           lt.mode = st.mode || null;
           lt.missing = !st.using;
+          lt.why = st.code || null;
           if (st.using === "tracker") {
             try {
               localStorage.setItem(LIVE_TRACKER_KEY, "1"); // (so the choice is offered from now on)
@@ -3034,6 +3035,16 @@ class CameraWallCard extends HTMLElement {
   }
 
   _ltMessage(lt, msg) {
+    if (msg && msg.status) {
+      // (Protect Tracker's local mode says when its engine's connection goes and comes back)
+      if (msg.mode) lt.mode = msg.mode;
+      const down = msg.status === "disconnected" && lt.mode === "local";
+      if (down !== !!lt.down) {
+        lt.down = down;
+        this._ltMark(lt);
+      }
+      return;
+    }
     lt.message(msg);
   }
 
@@ -3059,8 +3070,11 @@ class CameraWallCard extends HTMLElement {
     let text = LIVE_SOURCE_NAMES[src];
     let title = { auto: "Boxes: Protect Tracker's where it has them, UniFi Protect's otherwise (dashed). Click for only the local ones", local: "Boxes: what Protect Tracker's own model sees, whether or not UniFi Protect reports it (dotted until it does). Click for only UniFi Protect's", protect: "Boxes: only UniFi Protect's own. Click for the best of both" }[src];
     if (src === "local" && lt.missing) {
-      text += " · not installed";
+      text += lt.why === "not_ready" ? " · engine not running" : lt.why === "unknown_command" ? " · not installed" : " · not answering";
       title = "Protect Tracker isn't answering, so there are no local boxes. Click for UniFi Protect's";
+    } else if (src === "local" && (lt.down || lt.quiet)) {
+      text += " · engine down";
+      title = "Protect Tracker's engine is not connected, or has gone quiet. Click for UniFi Protect's";
     } else if (src === "local" && lt.using === "tracker" && lt.mode !== "local") {
       text += " · older tracker";
       title = "This Protect Tracker has no local mode yet: these are its model's boxes out of its mixed feed. Click for UniFi Protect's";
@@ -3070,7 +3084,7 @@ class CameraWallCard extends HTMLElement {
     }
     if (chip.textContent !== text) chip.textContent = text;
     chip.title = title;
-    chip.classList.toggle("warn", src === "local" && (!!lt.missing || !!lt.idle));
+    chip.classList.toggle("warn", src === "local" && (!!lt.missing || !!lt.idle || !!lt.down || lt.quiet));
   }
 
   static _ltAt(t, at) {
@@ -3110,6 +3124,11 @@ class CameraWallCard extends HTMLElement {
         const k = (this._zoom && this._zoom.s) || 1;
         lt.place = [(pic.left - frame.left) / k, (pic.top - frame.top) / k, pic.width / k, pic.height / k];
       } else lt.place = null;
+      // (gone quiet, or back: the chip says so)
+      if (lt.src === "local" && lt.quiet !== !!lt.wasQuiet) {
+        lt.wasQuiet = lt.quiet;
+        this._ltMark(lt);
+      }
       // Local picked and the model has nothing while Protect does: said on the chip (after a moment, so it doesn't blink)
       if (lt.src === "local") {
         const none = lt.using === "tracker" && !now.length && lt.visible(at).length > 0;

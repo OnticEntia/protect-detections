@@ -121,8 +121,10 @@ export function subscribeLive(hass, entity, source, onMessage, onState = () => {
     want !== "local"
       ? listen("tracker")
       : listen("tracker", "local").catch((err) => {
-          if (stopped || !err || err.code === "unknown_command") throw err;
-          return listen("tracker"); // (one from before the local mode: it refuses the extra word)
+          // only one from before the local mode, which refuses the extra word, is asked the old way;
+          // anything else (not installed, its engine not running, not a camera of its) is what it is
+          if (stopped || !err || err.code !== "invalid_format") throw err;
+          return listen("tracker");
         });
   const use = (sub) => {
     if (stopped) return drop(sub);
@@ -237,6 +239,8 @@ export class LiveTracks {
     this.lag = null; // (rtp) the frame on screen is this far behind the newest positions
     this.channel = 1;
     this.began = Date.now(); // when listening started (our clock)
+    this.heardAt = 0; // when (our clock) the last message came
+    this.whole = false; // do the messages each tell every thing there is (a snapshot)
     this.said = false; // do the messages say who made their positions
     this.localAt = 0; // when (our clock) a locally made one last came
     this.debug = false; // (live_debug) also check the timing against the picture
@@ -247,6 +251,9 @@ export class LiveTracks {
     if (!msg || msg.status || !Number.isFinite(msg.clockWall)) return;
     const now = Date.now();
     const local = msg.source === "local";
+    this.heardAt = now;
+    if (msg.mode === "local" || msg.mode === "auto") this.mode = msg.mode;
+    this.whole = msg.snapshot === true;
     if (local || msg.source === "protect") this.said = true;
     if (local) this.localAt = now;
     // The moment the positions are for. Messages carry the camera's wall
@@ -302,6 +309,7 @@ export class LiveTracks {
       if (tr.local !== true && t.localAt != null && Math.abs(at - t.localAt) < LIVE_LOCAL_HOLD_MS) continue;
       const c = tr.coord.map(Number);
       t.pts.push([at, ...c]);
+      t.end = null; // (it is there)
       // moved, as measured: further than a wobble from where it last rested
       const mid = [c[0] + c[2] / 2, c[1] + c[3] / 2];
       const step = Math.max(10, 0.12 * Math.min(c[2], c[3]));
@@ -316,6 +324,12 @@ export class LiveTracks {
       const said = !tr.stationary && tr.moving !== false;
       if (((t.went === at && tr.moving !== false) || (young && said)) && at > t.moved) t.moved = at;
       while (t.pts.length > 2 && t.pts[0][0] < at - LIVE_KEEP_MS) t.pts.shift();
+    }
+    // A message that tells every thing there is: one it doesn't tell has
+    // gone, as of its last position (no carrying it on, no holding it).
+    if (this.whole) {
+      const told = new Set((msg.tracks || []).map((tr) => tr && tr.id));
+      for (const [id, t] of this.tracks) if (!told.has(id) && t.end == null) t.end = t.pts[t.pts.length - 1][0];
     }
     for (const [id, t] of this.tracks) {
       if (t.pts[t.pts.length - 1][0] < at - LIVE_KEEP_MS) this.tracks.delete(id);
@@ -334,6 +348,7 @@ export class LiveTracks {
     if (!b) {
       const past = at - a[0];
       if (past > LIVE_HOLD_MS) return null;
+      if (t.end != null && past > 40) return null; // (told to have gone)
       // its next position isn't here yet: it keeps moving as it just did, for a moment
       // How it was moving. With a few reports a second: from the one before.
       // With many (one a frame): the later half of the last 400 ms against
@@ -594,6 +609,12 @@ export class LiveTracks {
   // behind it; null before the first message.
   moment(behind) {
     return this.gap == null ? null : Date.now() - this.gap + LIVE_TRANSIT_MS - behind;
+  }
+
+  // Has a sender that tells every second, even with nothing to tell (Protect
+  // Tracker's local mode), gone quiet? Then the camera isn't being served.
+  get quiet() {
+    return this.whole && this.heardAt > 0 && Date.now() - this.heardAt > 3500;
   }
 
   // Who makes the positions now, where the sender says: "local" (Protect

@@ -811,6 +811,7 @@ class ProtectTrackingCard extends HTMLElement {
     this._mark();
     this._tick = setInterval(() => {
       if (!document.hidden && this._onScreen !== false) this._askSeen();
+      this._quietCheck();
       this._idle();
     }, 30000);
     this._sync();
@@ -1026,7 +1027,7 @@ class ProtectTrackingCard extends HTMLElement {
             this._srcNote = false;
           } else if (this._config.source === "local") {
             // asked for by name: said, and it is looked for again by itself
-            this._note = st.code === "unknown_command" ? "Protect Tracker isn't installed (source: local)" : "Protect Tracker isn't answering (source: local)";
+            this._note = st.code === "unknown_command" ? "Protect Tracker isn't installed (source: local)" : st.code === "not_ready" ? "Protect Tracker's engine isn't running (source: local)" : "Protect Tracker isn't answering (source: local)";
             this._srcNote = true;
           } else if (st.code === "unknown_command") this._state = "norelay";
           else this._note = "Couldn't start listening for this camera";
@@ -1075,13 +1076,29 @@ class ProtectTrackingCard extends HTMLElement {
     frame.classList.toggle("warmlive", live);
   }
 
+  // Protect Tracker's local mode tells every second, even with nothing to
+  // tell: gone quiet, this camera isn't being served, and the card says so.
+  _quietCheck() {
+    const quiet = [...((this._subs && this._subs.values()) || [])].some((sub) => sub.lt.quiet);
+    const was = !!this._quietNote;
+    if (quiet) this._note = "Protect Tracker has gone quiet: this camera isn't being served";
+    else if (was) this._note = "";
+    this._quietNote = quiet;
+    if (quiet !== was && !this._active) this._idle();
+  }
+
   _message(sub, msg) {
     if (msg && msg.status) {
-      this._note = msg.status === "error" ? "Protect's live tracking can't be reached (trying again)" : "";
+      // (Protect Tracker's local mode tells when its engine's connection goes and comes back)
+      const engine = msg.mode === "local" || sub.lt.mode === "local";
+      const say = msg.status === "error" ? "Protect's live tracking can't be reached (trying again)" : msg.status === "disconnected" && engine ? "Protect Tracker's engine is not connected" : "";
+      // (what is said about the source itself, such as a tracker too old for local mode, stays through a "connected")
+      if (say || !this._srcNote) this._note = say;
       if (!this._active) this._idle();
       return;
     }
     sub.lt.message(msg);
+    if (this._quietNote) this._quietCheck();
     const types = this._config.types;
     // (a face found on someone being followed is part of them, not a thing of its own)
     const own = (msg.tracks || []).filter((tr) => tr && tr.of == null);

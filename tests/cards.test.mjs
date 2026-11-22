@@ -1352,12 +1352,14 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const mkConn = (kind) => { const c = { asked: [], open: new Map(),
     subscribeMessage(cb, m) { if (!m.type.endsWith("/live/subscribe")) return Promise.resolve(() => {}); c.asked.push(m.type === TR ? "tracker" + (m.mode ? ":" + m.mode : "") : "protect");
       if (m.type === TR && !kind) return Promise.reject({ code: "unknown_command" });
+      if (m.type === TR && kind === "down") return Promise.reject({ code: "not_ready", message: "engine not connected" });
       if (m.type === TR && kind === "old" && "mode" in m) return Promise.reject({ code: "invalid_format", message: "extra keys not allowed @ data['mode']" });
       c.open.set(m.type, cb); c.mode = m.mode || null; return Promise.resolve(() => c.open.delete(m.type)); } }; return c; };
   const run = async (kind, source) => { const conn = mkConn(kind); const states = []; const stop = ctx.subscribeLive({ connection: conn }, "camera.x", source, () => {}, (st) => states.push(`${st.using}/${st.mode || "-"}${st.code ? ":" + st.code : ""}`)); await tick(); await tick(); return { conn, states, stop }; };
   let r = await run("new", "local"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "tracker/local", "source local: Protect Tracker is asked for its local mode"); r.stop();
   r = await run("old", "local"); ok(r.conn.asked.join() === "tracker:local,tracker" && r.states.join() === "tracker/auto" && r.conn.mode === null, "a Protect Tracker from before that mode refuses the word: its ordinary feed is used, and the state says which"); r.stop();
   r = await run(null, "local"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "null/-:unknown_command", "no Protect Tracker at all: said so (not tried a second way, not Protect's instead)"); r.stop();
+  r = await run("down", "local"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "null/-:not_ready", "its engine not running (not_ready): said as that, and its mixed feed is not used in its place"); r.stop();
   r = await run("new", "auto"); ok(r.conn.asked.join() === "tracker" && r.states.join() === "tracker/auto", "source auto: its ordinary mode, no word added"); r.stop();
   r = await run("new", "protect"); ok(r.conn.asked.join() === "protect" && r.states.join() === "protect/-", "source protect: not asked at all"); r.stop();
 
@@ -1378,6 +1380,17 @@ ok(w._built && !w._building, "next good config builds after a failure");
   // the stream clock starting over (the camera restarted): taken up afresh, nothing stuck
   Date.now = () => B + 60000 + 7000; lt.message({ clockWall: B + 60000, clockStream: 500, clockStreamRate: 1000, source: "local", tracks: [{ id: "L2", coord: [10, 10, 50, 50], objectType: "person", local: true }] }); Date.now = real;
   ok(lt.tracks.size === 1 && lt.tracks.has("L2") && lt.tracks.get("L2").pts.length === 1, "the stream clock starts over: what was held is let go and the new positions are taken");
+  // a packet that tells every thing there is: one not told has gone, at once
+  { const sn = new ctx.LiveTracks(); const pk = (ms, ids) => ({ clockWall: B + ms, clockStream: S + ms, clockStreamRate: 1000, mode: "local", source: "local", snapshot: true, eventId: null, tracks: ids.map((id, k) => ({ id, coord: [100 + ms * 0.1 + k * 300, 300, 60, 160], objectType: "person", local: true, confirmed: false, moving: true, stationary: false })) });
+    for (let ms = 0; ms <= 900; ms += 100) { Date.now = () => B + ms + 7000; sn.message(pk(ms, ["L1", "L2"])); }
+    Date.now = () => B + 1000 + 7000; sn.message(pk(1000, ["L1"])); Date.now = real;
+    ok(sn.mode === "local" && sn.whole === true, "local packets say their mode and that each tells every thing there is");
+    ok(ctx.LiveTracks.at(sn.tracks.get("L2"), B + 900) !== null && ctx.LiveTracks.at(sn.tracks.get("L2"), B + 1000) === null && ctx.LiveTracks.at(sn.tracks.get("L1"), B + 1000) !== null, "a thing left out of such a packet has gone as of its last position: not carried on, not held for a moment");
+    const plain = new ctx.LiveTracks(); for (let ms = 0; ms <= 900; ms += 100) plain.message({ clockWall: B + ms, tracks: [{ id: "u", coord: [100 + ms * 0.1, 300, 60, 160], objectType: "person" }] }); plain.message({ clockWall: B + 1000, tracks: [] });
+    ok(ctx.LiveTracks.at(plain.tracks.get("u"), B + 1100) !== null, "(a feed that doesn't say so keeps the short hold, as before)");
+    // the heartbeat: an empty packet every second; gone quiet means the camera isn't served
+    Date.now = () => B + 2000 + 7000; sn.message(pk(2000, [])); ok(sn.quiet === false && sn.tracks.size >= 1, "an empty packet (the heartbeat): heard, nothing wrong");
+    Date.now = () => B + 6000 + 7000; ok(sn.quiet === true && plain.quiet === false, "nothing for four seconds from a sender that tells every second: gone quiet (a feed that only speaks when there is something is never 'quiet')"); Date.now = real; }
   // the engine's own view of moving
   const mv = new ctx.LiveTracks(); ctx.LiveTracks.SETTLE_MS = -Infinity;
   mv.message({ clockWall: B, tracks: [{ id: "a", coord: [1, 1, 50, 50], objectType: "person", stationary: false, moving: false }, { id: "b", coord: [200, 1, 50, 50], objectType: "person", stationary: false, moving: true }, { id: "c", coord: [400, 1, 50, 50], objectType: "person", stationary: false }] });
@@ -1406,6 +1419,17 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(!c._active, "something the engine itself says is not moving doesn't wake the card, whatever 'stationary' says"); c.disconnectedCallback();
   c = await mkc({ source: "local" }, "old");
   ok(/no local mode yet/.test(note(c)) && c.conn.open.has(TR) && !c._state, "an older Protect Tracker: the card says its local mode isn't there yet, and goes by the model's boxes from the mixed feed");
+  c._subs.values().next().value.lt.mode = "auto"; c.conn.open.get(TR)({ status: "connected", mode: "auto", service: true });
+  ok(/no local mode yet/.test(note(c)), "and still says so after that tracker's 'connected'");
+  c.disconnectedCallback();
+  c = await mkc({ source: "local" }, "down"); ok(/engine isn't running/.test(note(c)) && !c.conn.open.has(TR), "its engine not running: said so"); c.disconnectedCallback();
+  c = await mkc({ source: "local" }, "new"); c.conn.open.get(TR)({ status: "connected", mode: "local", service: true }); ok(note(c) === "", "local mode connected: nothing to say");
+  c.conn.open.get(TR)({ status: "disconnected", mode: "local" }); ok(/engine is not connected/.test(note(c)), "the engine's connection goes: said");
+  c.conn.open.get(TR)({ status: "connected", mode: "local", service: true }); ok(note(c) === "", "and back: cleared");
+  { const realNow = Date.now; const t0 = realNow(); c.conn.open.get(TR)({ clockWall: t0, clockStream: 5000, clockStreamRate: 1000, mode: "local", source: "local", snapshot: true, tracks: [] });
+    c._quietCheck(); ok(note(c) === "", "heartbeats coming: nothing to say");
+    Date.now = () => t0 + 5000; c._quietCheck(); ok(/gone quiet/.test(note(c)), "no heartbeat for five seconds: the card says the camera isn't being served");
+    c.conn.open.get(TR)({ clockWall: t0 + 5000, clockStream: 10000, clockStreamRate: 1000, mode: "local", source: "local", snapshot: true, tracks: [] }); ok(note(c) === "", "the next heartbeat clears it"); Date.now = realNow; }
   c.disconnectedCallback();
 
   // --- the wall's chip
@@ -1415,6 +1439,9 @@ ok(w._built && !w._building, "next good config builds after a failure");
     await tick(); await tick(); await tick(); w._openLive(0); await tick(); await tick(); ctx.localStorage.store["camera-wall-card:live-boxes"] = "1"; w._ltSync(); await tick(); await tick(); w.conn = conn; return w; };
   let w = await mkw("new"); ok(w.conn.asked.join() === "tracker:local" && w._liveRoot.querySelector(".lsrc").textContent === "Local" && w._lt.mode === "local", "the live view on Local: the local mode is asked for, the chip says Local"); w._closeLive(); w.disconnectedCallback();
   w = await mkw("old"); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local · older tracker" && w._liveRoot.querySelector(".lsrc").classList.contains("warn") === false, "with an older Protect Tracker the chip says so"); w._closeLive(); w.disconnectedCallback();
+  w = await mkw("down"); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local · engine not running" && w._liveRoot.querySelector(".lsrc").classList.contains("warn"), "its engine not running: on the chip"); w._closeLive(); w.disconnectedCallback();
+  w = await mkw("new"); w.conn.open.get(TR)({ status: "disconnected", mode: "local" }); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local · engine down", "the engine's connection going while watching: on the chip");
+  w.conn.open.get(TR)({ status: "connected", mode: "local", service: true }); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local", "and back"); w._closeLive(); w.disconnectedCallback();
   ctx.setTimeout = realTimeout; ctx.localStorage.store = {};
 }
 // --- the tracking card's "Last seen", from the integration's record
