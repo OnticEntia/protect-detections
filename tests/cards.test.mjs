@@ -1172,7 +1172,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const suv = { id: "suv", coord: [450, 140, 110, 70], objectType: "vehicle", stationary: true, desc: "gray suv" };
   const pass = (t0) => (t) => 100 + (t - t0) * 0.25; // the passing car's left edge: crosses the SUV's place about 1.4 s in
   const track = async (cfg, during, after, note) => { const c2 = await mkc({ types: ["vehicle"], ...cfg }); c2.run(4000, () => [suv]); const t0 = c2.T; const x = pass(t0);
-    const seen = new Set(); let onSuv = 0; const step = (ms, f) => { for (let end = c2.T + ms; c2.T < end; ) { c2.run(100, f); if (c2._active) { seen.add(String(c2._active.subject)); const [cx, k] = c2.centre(); if (k > 1.5 && Math.abs(cx - 505) < 45 && c2.T - t0 > 1700) onSuv++; } } };
+    const seen = new Set(); let onSuv = 0; const step = (ms, f) => { for (let end = c2.T + ms; c2.T < end; ) { c2.run(100, f); if (c2._active) { seen.add(String(c2._active.subject)); const [cx, k] = c2.centre(); if (k > 1.5 && Math.abs(cx - 505) < 45 && c2.T - t0 > 2300) onSuv++; // (counted from when the passing car itself, and the view following it, are clear of the parked car's place) } } };
     step(3000, (t) => during(t, x, t0)); step(9000, (t) => after(t, x, t0)); return { c2, seen, onSuv, t0 }; };
   // 1. as it should come: two ids, the passer drives on and out
   let r = await track({}, (t, x) => [suv, car("pass", x(t))], (t, x) => (x(t) < 1000 ? [suv, car("pass", x(t))] : [suv]));
@@ -1180,22 +1180,22 @@ ok(w._built && !w._building, "next good config builds after a failure");
   r.c2.disconnectedCallback();
   // 2. the tracker hands the passer's id to the parked car: its box stops dead on the SUV's place
   r = await track({}, (t, x) => [suv, x(t) < 440 ? car("pass", x(t)) : { id: "pass", coord: [452 + (t % 200 ? 1 : -1), 141, 108, 69], objectType: "vehicle", stationary: false, local: true }], (t) => [suv, { id: "pass", coord: [452 + (t % 200 ? 1 : -1), 141, 108, 69], objectType: "vehicle", stationary: false, local: true }]);
-  ok(r.onSuv <= 15 && !r.c2._active, `the passer's id ends up on the parked car, reported as moving: counted as lost there (zoomed on the parked one for ${r.onSuv * 100} ms at most, the moment it takes to see it has stopped), then standing by`);
+  ok(r.onSuv <= 5 && !r.c2._active, `the passer's id ends up on the parked car, reported as moving: counted as lost there (zoomed on the parked one for ${r.onSuv * 100} ms beyond the moment the car itself was there), then standing by`);
   r.c2.disconnectedCallback();
   // 3. the same, with the parked car's own report gone once the id sits on it (only what was remembered tells)
   r = await track({}, (t, x) => (x(t) < 440 ? [suv, car("pass", x(t))] : [{ id: "pass", coord: [452, 141, 108, 69], objectType: "vehicle", stationary: false, local: true }]), () => [{ id: "pass", coord: [452, 141, 108, 69], objectType: "vehicle", stationary: false, local: true }]);
-  ok(r.onSuv <= 15 && !r.c2._active, `the parked car's own report gone meanwhile: where it stood is remembered, and the subject is still counted as lost (${r.onSuv * 100} ms)`);
+  ok(r.onSuv <= 5 && !r.c2._active, `the parked car's own report gone meanwhile: where it stood is remembered, and the subject is still counted as lost (${r.onSuv * 100} ms)`);
   r.c2.disconnectedCallback();
   // 4. the passer vanishes at the parked car and a new 'moving' id appears on it
   r = await track({}, (t, x) => (x(t) < 440 ? [suv, car("pass", x(t))] : [suv, { id: "ghost", coord: [455, 142, 105, 68], objectType: "vehicle", stationary: false, local: true }]), () => [suv, { id: "ghost", coord: [455, 142, 105, 68], objectType: "vehicle", stationary: false, local: true }]);
-  ok(r.onSuv <= 15 && !r.c2._active, `a new id turning up on the parked car as the passer disappears: not settled on either (${r.onSuv * 100} ms)`);
+  ok(r.onSuv <= 5 && !r.c2._active, `a new id turning up on the parked car as the passer disappears: not settled on either (${r.onSuv * 100} ms)`);
   r.c2.disconnectedCallback();
   // 5. the subject's box jumps across the picture
   c = await mkc({ types: ["vehicle"] }); c.run(1500, (t) => [car("j", 100 + t * 0.1)]); c.run(300, () => [car("j", 800)]);
   ok(c._active.subject !== "j", "the subject's box jumps across the picture from one report to the next: not followed there"); c.disconnectedCallback();
   // 6. and with the real passer still driving on after the mix-up: the view goes with what moves
   r = await track({}, (t, x) => [suv, car("pass", x(t))], (t, x, t0) => [suv, { id: "pass", coord: [452, 141, 108, 69], objectType: "vehicle", stationary: false, local: true }, ...(x(t) < 1000 ? [car("pass2", x(t))] : [])]);
-  ok(r.seen.has("pass2") && r.onSuv <= 15, "the id stays on the parked car while the car itself drives on under a new id: the view goes on with the car");
+  ok(r.seen.has("pass2") && r.onSuv <= 5, "the id stays on the parked car while the car itself drives on under a new id: the view goes on with the car");
   r.c2.disconnectedCallback();
   // a vehicle that really stops is let go after the linger (not 20 s)
   c = await mkc({ types: ["vehicle"], linger: 5 }); c.run(2000, (t) => [car("p", 100 + t * 0.1)]); const stopAt = c.T;
