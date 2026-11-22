@@ -2023,7 +2023,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(tcard._config.types.join() === "person,vehicle" && store.value.walls.default.opts["track:d1"].types.join() === "person,vehicle", "what it watches for is changed on the tile and kept");
   w._wallContext(100, 100, ti); click(w, "Sharpest stream at home"); await tick(); ok(tcard._config.stream === "low" && tcard._config.types.join() === "person,vehicle", "and its stream");
   w._wallContext(100, 100, ti); ok(labels(w).includes("Standby: radar✓") && labels(w).includes("Standby: pulse") && labels(w).includes("Standby: none"), "and how it looks while standing by");
-  click(w, "Standby: pulse"); await tick(); ok(tcard._config.standby === "pulse" && tcard._root.querySelector(".frame").classList.contains("s-pulse") && store.value.walls.default.opts["track:d1"].standby === "pulse", "a standby style from the menu is applied to the tile and kept");
+  ok(labels(w).includes("Standby: static"), "the tile's menu offers the static look too"); click(w, "Standby: pulse"); await tick(); ok(tcard._config.standby === "pulse" && tcard._root.querySelector(".frame").classList.contains("s-pulse") && store.value.walls.default.opts["track:d1"].standby === "pulse", "a standby style from the menu is applied to the tile and kept");
   let opened = null; const realOpen = w._openLive.bind(w); w._openLive = (i) => { opened = i; };
   w._wallContext(100, 100, ti); click(w, "Open camera"); ok(opened === 0, "Open camera opens that camera's dialog"); w._openLive = realOpen;
   // the press that opened the menu doesn't also open the camera
@@ -2108,6 +2108,26 @@ ok(w._built && !w._building, "next good config builds after a failure");
   c = await mk({}); subs.get("camera.p_medium_resolution_channel")({ clockWall: Date.now() - 400, tracks: [{ id: "v", coord: [100, 500, 100, 60], objectType: "vehicle", stationary: false }] });
   ok(c._root.querySelector(".blips").children.length === 0, "without show_others: no blips"); c.disconnectedCallback();
   ctx.localStorage.store = {};
+}
+// --- the tracking card's "static" standby look
+{
+  const mkS = (cfg) => { const c = new Trk(); c.setConfig(cfg); return c; };
+  const a1 = mkS({ standby: "static" }); const f1 = a1._root.querySelector(".frame"); const tex = f1.style._v["--static"];
+  ok(f1.classList.contains("s-static") && typeof tex === "string" && tex.startsWith('url("data:image/svg+xml,') && tex.length > 2000 && tex.length < 120000, `standby: static: the card gets the look and its texture (an SVG picture of blocks, ${Math.round(tex.length / 1024)} kB, no canvas)`);
+  const svg = decodeURIComponent(tex.slice(tex.indexOf(",") + 1, -2));
+  ok(/viewBox="0 0 192 27"/.test(svg) && /preserveAspectRatio="none"/.test(svg) && (svg.match(/<path/g) || []).length === 2 && /opacity="\.42"/.test(svg), "four frames of 48 x 27 blocks side by side, in two strengths");
+  const cells = (svg.match(/M\d+ \d+h/g) || []).length; ok(cells > 192 * 27 * 0.4 && cells < 192 * 27 * 0.62, `about half of the blocks are lit (${Math.round((cells / (192 * 27)) * 100)} %): thick static, not a sprinkle`);
+  ok(mkS({ standby: "static" })._root.querySelector(".frame").style._v["--static"] === tex, "made once for the page: every card with the look shares it");
+  ok(mkS({ standby: "radar" })._root.querySelector(".frame").style._v["--static"] === undefined && mkS({})._root.querySelector(".frame").style._v["--static"] === undefined, "the other looks are not handed it");
+  ok(a1._root.innerHTML.includes('<div class="noise"></div>') && a1._root.innerHTML.indexOf('class="noise"') < a1._root.innerHTML.indexOf('class="snap"'), "the static lies under the picture, which is added on top of it");
+  const css = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8");
+  ok(/\.frame\.s-static:not\(\.active\) \.snap, \.frame\.s-static\.warmlive:not\(\.active\) \.zoomer \{ filter: grayscale\(1\)[^}]*mix-blend-mode: screen/.test(css), "standing by, the still (or with warm the live picture) is black and white and added on, so its bright parts glow through");
+  ok(/\.frame\.paused \.noise, \.frame\.active:not\(\.lock\) \.noise \{ animation-play-state: paused; \}/.test(css) && /prefers-reduced-motion: reduce\) \{ \.noise \{ animation: none !important/.test(css) && /\.frame\.s-static\.active \.noise \{ opacity: 0; \}/.test(css), "it stops while the card is out of sight or following, holds still for less motion, and drops out when following starts");
+  ok(css.indexOf(".frame.s-static:not(.active) .snap") > css.indexOf(".frame.warmlive:not(.active) .snap"), "(its rules come after the ones for the live standby picture, which they build on)");
+  const form = Trk.getConfigElement(); form.setConfig({}); const opts = form._form.schema.find((x) => x.name === "standby").selector.select.options;
+  ok(opts.map((o) => o.value).join() === "radar,pulse,scanline,static,none" && /Static \(the picture glowing through/.test(opts.find((o) => o.value === "static").label), "the editor offers it, and says where its picture comes from");
+  const fc = mkS({ standby: "static", box_style: "reticle" })._root.querySelector(".frame"); ok(fc.classList.contains("bs-reticle") && fc.classList.contains("s-static"), "it goes with the reticle look (the brackets rest on the static, to fly from)");
+  ok(!/toDataURL|getImageData/.test(css), "(the texture is not taken off a canvas)");
 }
 // --- the tracking card's size
 {

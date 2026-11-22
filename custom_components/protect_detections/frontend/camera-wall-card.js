@@ -2905,7 +2905,7 @@ class CameraWallCard extends HTMLElement {
           kit.item("Sharpest stream at home", () => this._setOpts(el.key, { stream: low ? "auto" : "low" }), { mark: low ? "" : "✓" }),
           kit.hr(),
           // how it looks while standing by
-          ...[["radar", "Radar"], ["pulse", "Pulse"], ["scanline", "Scan line"], ["none", "None"]].map(([style, label]) =>
+          ...[["radar", "Radar"], ["pulse", "Pulse"], ["scanline", "Scan line"], ["static", "Static"], ["none", "None"]].map(([style, label]) =>
             kit.item(`Standby: ${label.toLowerCase()}`, () => this._setOpts(el.key, { standby: style }), { mark: (conf.standby || "radar") === style ? "✓" : "" })
           ),
           kit.hr(),

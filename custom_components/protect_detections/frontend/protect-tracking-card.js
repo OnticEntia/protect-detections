@@ -25,7 +25,9 @@
  *   snapshot: 60                            # seconds between still pictures behind the
  *                                           # standing-by text; 0 for none
  *   standby: radar                          # how standing by looks: radar (a sweep), pulse
- *                                           # (rings), scanline, or none (just the still)
+ *                                           # (rings), scanline, static (thick black-and-
+ *                                           # accent static, the picture glowing through it
+ *                                           # in black and white), or none (just the still)
  *   accent: "#e0102a"                       # the scanner's colour (default: the theme's
  *                                           # primary colour)
  *   warm: false                             # true: the live picture while standing by
@@ -159,7 +161,36 @@ import { findProtectCameras } from "./protect-cameras.js";
 import { LiveTracks, LIVE_COLORS, LIVE_SOURCES, subscribeLive, deepFind, pictureBox } from "./protect-live.js";
 
 const KINDS = { person: ["Person", "people"], vehicle: ["Vehicle", "vehicles"], animal: ["Animal", "animals"], package: ["Package", "packages"] };
-const STANDBY = ["radar", "pulse", "scanline", "none"]; // how standing by looks
+const STANDBY = ["radar", "pulse", "scanline", "static", "none"]; // how standing by looks
+
+// The "static" look's texture: coarse blocks, made once for the page, as a
+// picture in SVG (no canvas): four frames side by side, each STATIC_W x
+// STATIC_H blocks, some full, some half strength. It is used as a mask over
+// the accent colour, so the static is black and the card's own red; stepping
+// along the four frames a few times a second is all the animation there is.
+const STATIC_W = 48;
+const STATIC_H = 27;
+const STATIC_FRAMES = 4;
+let staticUrl = null;
+function staticTexture() {
+  if (staticUrl) return staticUrl;
+  let full = "";
+  let half = "";
+  for (let f = 0; f < STATIC_FRAMES; f++) {
+    for (let y = 0; y < STATIC_H; y++) {
+      for (let x = 0; x < STATIC_W; x++) {
+        const r = Math.random();
+        // (runs of two blocks now and then, for a torn look rather than salt and pepper)
+        const w = r < 0.08 && x < STATIC_W - 1 ? 2 : 1;
+        if (r < 0.3) full += `M${f * STATIC_W + x} ${y}h${w}v1h-${w}z`;
+        else if (r < 0.52) half += `M${f * STATIC_W + x} ${y}h1v1h-1z`;
+      }
+    }
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${STATIC_W * STATIC_FRAMES} ${STATIC_H}" preserveAspectRatio="none" shape-rendering="crispEdges"><path d="${full}"/><path opacity=".42" d="${half}"/></svg>`;
+  staticUrl = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+  return staticUrl;
+}
 const LOCK_MS = 520; // the "there they are" beat as the picture comes in
 const HOLD_MS = 1500; // the view stays this long where they were last seen, before easing out
 const EASE_MS = 350;
@@ -460,6 +491,21 @@ const STYLE = `
   .lock .scan .reticle::before { animation: trk-lock .5s ease-out 1 both; }
   .scan .blips i { position: absolute; width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-radius: 50%; background: var(--acc);
     box-shadow: 0 0 8px var(--acc); opacity: 0; animation: trk-blip 1.6s ease-out 1 both; }
+  /* --- static: thick black-and-accent static, with the picture (the live one with warm, else the still)
+     in black and white, added on top so that its bright parts glow through */
+  .noise { position: absolute; inset: 0; display: none; pointer-events: none; background: var(--tracking-accent, var(--primary-color, #e0102a));
+    -webkit-mask-image: var(--static); mask-image: var(--static); -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+    -webkit-mask-size: 400% 100%; mask-size: 400% 100%; -webkit-mask-position: 0 0; mask-position: 0 0;
+    animation: trk-static .44s steps(4, jump-none) infinite; transition: opacity .32s steps(4, jump-none); }
+  .frame.s-static .noise { display: block; }
+  .frame.s-static:not(.active) .snap, .frame.s-static.warmlive:not(.active) .zoomer { filter: grayscale(1) contrast(1.25) brightness(1.05); mix-blend-mode: screen; opacity: .85; }
+  /* (following: the static drops out in steps, as a signal locking; standing by again it floods back the same way) */
+  .frame.s-static.active .noise { opacity: 0; }
+  .frame.s-static .scan { background: radial-gradient(ellipse at center, rgba(0,0,0,0) 35%, rgba(0,0,0,.5) 100%); }
+  .frame.s-static .sweep, .frame.s-static .rings, .frame.s-static .line, .frame.s-static .grid { display: none; }
+  .frame.paused .noise, .frame.active:not(.lock) .noise { animation-play-state: paused; }
+  @keyframes trk-static { from { -webkit-mask-position: 0 0; mask-position: 0 0; } to { -webkit-mask-position: 100% 0; mask-position: 100% 0; } }
+  @media (prefers-reduced-motion: reduce) { .noise { animation: none !important; transition: none !important; } }
   /* which parts each style has */
   .frame.s-radar .line { display: none; }
   .frame.s-radar .rings i { animation-duration: 5.4s; opacity: 0; border-width: 1px; }
@@ -985,6 +1031,7 @@ class ProtectTrackingCard extends HTMLElement {
     root.innerHTML = `<style>${STYLE}</style>
       <ha-card>
         <div class="frame" style="--ar:${Number(this._config.aspect_ratio) || 16 / 9}">
+          <div class="noise"></div>
           <img class="snap" alt="">
           <div class="zoomer"><div class="video"></div><div class="boxes"></div></div>
           <div class="scan"><div class="grid"></div><div class="sweep"></div><div class="rings"><i></i><i></i><i></i></div><div class="line"></div><div class="blips"></div><div class="reticle"></div></div>
@@ -1002,6 +1049,8 @@ class ProtectTrackingCard extends HTMLElement {
     const frame = root.querySelector(".frame");
     frame.classList.add(`s-${STANDBY.includes(this._config.standby) ? this._config.standby : "radar"}`);
     frame.classList.add(`bs-${this._boxStyle()}`);
+    // (the static's texture is only made, and only handed to the card, when that look is picked)
+    if (this._config.standby === "static") frame.style.setProperty("--static", staticTexture());
     this._phase = "standby";
     if (typeof this._config.accent === "string" && this._config.accent) frame.style.setProperty("--tracking-accent", this._config.accent);
     frame.addEventListener("click", () => this._open());
@@ -1772,7 +1821,7 @@ const EDIT_FORM = [
   { name: "camera", selector: { entity: { domain: "camera", integration: "unifiprotect" } } },
   { name: "name", selector: { text: {} } },
   { name: "types", selector: { select: { multiple: true, options: Object.entries(KINDS).map(([value, [label]]) => ({ value, label })) } } },
-  { name: "standby", selector: { select: { options: STANDBY.map((value) => ({ value, label: value.charAt(0).toUpperCase() + value.slice(1) })) } } },
+  { name: "standby", selector: { select: { options: STANDBY.map((value) => ({ value, label: value === "static" ? "Static (the picture glowing through: the live one with the live-picture switch below, else the still)" : value.charAt(0).toUpperCase() + value.slice(1) })) } } },
   { name: "linger", selector: { number: { min: 1, max: 120, mode: "box", unit_of_measurement: "s" } } },
   { name: "show_others", selector: { boolean: {} } },
   { name: "warm", selector: { boolean: {} } },
