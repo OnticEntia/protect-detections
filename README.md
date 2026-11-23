@@ -2,9 +2,11 @@
 
 A Home Assistant custom integration that brings UniFi Protect's smart detections to your dashboards, together with the cards that show them:
 
-- **Camera wall** – a screen-fitting wall of live camera feeds that you can arrange, with a live dialog (zoom, two-way talk, live boxes) and a detection history.
+- **Camera wall** – a screen-fitting wall of live camera feeds that you can arrange, with a live view (zoom, two-way talk, live boxes on what the camera is tracking), tracking tiles, and a detection history.
 - **Detection history** – a lightbox of past detections that plays Protect's recording with Protect's own boxes drawn frame by frame.
-- **Tracking card** – stands by with no video until a camera tracks a person, then shows that camera live and zoomed in on them.
+- **Tracking card** – stands by until a camera tracks a person (or whatever you tell it to watch for), then shows that camera live, zoomed in on them and staying on them, and stands by again when they have gone.
+
+It also keeps a small **record of live sightings** (when each kind of thing was last seen, and where), so that "Last seen" is the same on every device.
 
 It is a companion to Home Assistant's built-in **UniFi Protect** integration. It uses that integration's existing connection and login, and holds no credentials of its own.
 
@@ -21,6 +23,11 @@ It is a companion to Home Assistant's built-in **UniFi Protect** integration. It
 
 Camera and zone names are painted out in these pictures.
 
+<!-- screenshot: tracking card standing by, radar look (default options) -->
+<!-- screenshot: tracking card standing by, static look (standby: static, warm: true) -->
+<!-- screenshot: tracking card following a person: reticle brackets, tag, face inset (default options; a person in view) -->
+<!-- screenshot: camera wall live view with Boxes on and the Auto / Local / UniFi chip -->
+
 ## Requirements
 
 - Home Assistant 2026.3 or newer.
@@ -28,6 +35,9 @@ Camera and zone names are painted out in these pictures.
 - The **Protect Zones** custom integration (see [Companions](#companions)). Protect Detections uses the shared connection to Protect that Protect Zones provides and cannot be set up without it. Only its files need to be installed; you do not have to add it under Devices & services (though you will want to, for the zone features).
 - For recorded clips: `ffmpeg`, which Home Assistant already ships.
 - For live video in the cards: Home Assistant's own camera streaming (WebRTC through go2rtc, which Home Assistant sets up by default).
+- For live boxes and tracking: a camera that recognises things (Protect's smart detections).
+
+Nothing else is required. **Protect Tracker** (see [Companions](#companions)) is optional: the cards use it when it is there.
 
 ## Installation
 
@@ -46,13 +56,15 @@ Camera and zone names are painted out in these pictures.
 
 ### The cards need no setup
 
-The cards are part of the integration. It serves them itself and tells Home Assistant to load them, so there is **no dashboard resource to add**. After installing or updating, refresh the browser once.
+The cards are part of the integration. It serves them itself and tells Home Assistant to load them, so there is **no dashboard resource to add**.
+
+After installing or updating, **reload the page** in every browser, and **refresh the Home Assistant app** on phones and tablets (pull down on the dashboard, or *Settings → Companion app → Debugging → Reset frontend cache*). The app keeps its page open for days, and until it is refreshed it goes on running the cards it loaded before.
 
 If you used an earlier version that had you add `camera-wall-card.js`, `protect-detection-card.js` or `protect-tracking-card.js` as dashboard resources, remove those resources.
 
 ## The cards
 
-Every card works with just its `type:`. What is left out is looked up in Home Assistant.
+Every card works with just its `type:`. What is left out is looked up in Home Assistant. The camera wall and the tracking card have visual editors; a field the config leaves out shows what the card does by default, and is not written until you change it.
 
 ### Camera wall
 
@@ -60,21 +72,26 @@ Every card works with just its `type:`. What is left out is looked up in Home As
 type: custom:camera-wall-card
 ```
 
-Best in a view of type *Panel*. With no options it shows one feed per UniFi Protect camera (by name), the alarm panel if there is one, a History button, and a Local / Remote switch when Home Assistant knows both its internal and external address.
+Best in a view of type *Panel*. With no options it shows one feed per UniFi Protect camera (by name), a tracking tile for each camera that recognises things, the alarm panel if there is one, a History button, and a Local / Remote switch when Home Assistant knows both its internal and external address.
 
-- **Tap a feed** to open it in a dialog: digital zoom (wheel, pinch, drag), HD toggle, two-way talk on cameras with a speaker, and a *Boxes* button on cameras that recognise things.
-- **Arrange** (the button beside History): drag feeds to any cell of a grid, resize them, add or remove rows and columns. On a phone the wall is a list and arranging changes its order.
-- **Right-click** (press and hold on a touch screen) for a menu: resize a tile, take it off the wall or put it back, add or remove a camera's tracking tile.
-- The arrangement is saved for each Home Assistant user and follows them to every device.
-- **Editing from the wall** (administrators): the right-click menu has *Edit the wall…*, which opens Home Assistant's card editor on the wall itself and saves into the dashboard, and on a tracking tile *Edit this tracker…*, which opens the tracking card's editor (what it watches for, sound, standby look, source and so on) for that tile. A tile's settings are kept with your own arrangement, not in the dashboard; only what differs from the wall's `tracking:` options is stored. A dashboard kept in YAML is edited in its file.
-- The wall has a visual editor for its options. The camera lists, `alarm: false`, `alarm_modes`, `breakpoints` and options under `tracking:` stay YAML.
+- **Tap a feed** to open its live view: digital zoom (wheel, pinch, drag), HD toggle, two-way talk on cameras with a speaker, zones (with Protect Zones), and a *Boxes* button on cameras that recognise things.
+- **Boxes** draws a box on everything the camera is tracking, matched to the picture frame by frame (see [Live boxes](#live-boxes)). With Protect Tracker installed, a chip beside it chooses whose boxes: *Auto*, *Local* or *UniFi* (see [With Protect Tracker](#with-protect-tracker)).
+- **Tracking tiles** are tracking cards, one per camera, among the feeds.
+- **Arrange** (the button beside History): drag tiles to any cell of a grid, resize them, add or remove rows and columns. On a phone the wall is a list and arranging changes its order.
+- **Right-click** (press and hold on a touch screen) for a menu: resize a tile, take it off the wall or put it back, add or remove a camera's tracking tile, and on a tracking tile what it watches for and how it looks.
+- **The arrangement is yours:** places, sizes, what is on the wall and each tracking tile's own options are saved for each Home Assistant user and follow them to every device. They are not part of the dashboard.
+- **Editing from the wall** (administrators): the menu has *Edit the wall…*, which opens Home Assistant's card editor on the wall itself and saves into the dashboard, and on a tracking tile *Edit this tracker…*, which opens the tracking card's editor for that tile (saved with your arrangement; only what differs from the wall's `tracking:` options is stored). A dashboard kept in YAML is edited in its file.
+
+<!-- screenshot: camera wall right-click menu on a tracking tile, showing "Edit this tracker…" -->
+<!-- screenshot: the camera wall's visual editor -->
 
 | Option | Default | What it does |
 |---|---|---|
-| `cameras` | found | A list of `{entity, tap_entity, name}` to use instead of the cameras that are found. `entity` is shown on the wall, `tap_entity` in the dialog. |
+| `cameras` | found | A list of `{entity, tap_entity, name}` to use instead of the cameras that are found. `entity` is shown on the wall, `tap_entity` in the live view. |
 | `exclude` | – | Found cameras to leave out: names (`*` and `?` allowed), entity ids or device ids. |
 | `order` | by name | Found cameras to put first, in this order. |
 | `alarm` | found | An `alarm_control_panel` entity, or `false` for none. |
+| `alarm_name` | `Alarm` | The alarm panel's label. |
 | `alarm_modes` | `[armed_home, armed_away, disarmed]` | The modes offered. |
 | `history` | found | A camera list like `cameras` for the History lightbox, or `false` for none. |
 | `local_url`, `remote_url` | from Home Assistant | The two addresses for the Local / Remote switch, or `false`. |
@@ -82,14 +99,16 @@ Best in a view of type *Panel*. With no options it shows one feed per UniFi Prot
 | `breakpoints` | `[[1024, 3], [600, 2], [0, 1]]` | `[minimum screen width, columns]`. |
 | `arrange` | `true` | `false` hides the Arrange button. |
 | `layout` | `default` | A name for this wall's saved arrangement, if you have several walls. |
-| `tracking` | on | `false` for no tracking tiles, or options for them (see the tracking card), e.g. `{types: [person], stream: low}`. |
+| `tracking` | on | `false` for no tracking tiles, or options for all of them (any of the tracking card's), e.g. `{types: [person], stream: low}`. |
 | `live_tracks` | `true` | `false` hides the Boxes button. |
-| `live_delay` | `700` | Milliseconds the live picture is held back while Boxes is on, so boxes line up with it. |
-| `live_offset` | `0` | Milliseconds to draw the boxes later (+) or earlier (−). |
-| `live_debug` | `false` | `true` writes on the live picture how the boxes are being timed (see Troubleshooting). |
-| `source` | `auto` | Whose positions the live boxes and tracking tiles use: `auto`, `local` or `protect` (see [Protect Tracker](#companions)). |
+| `source` | `auto` | Whose positions: `auto`, `local` or `protect`. It is where the live view's chip starts, and what the tracking tiles use (see [With Protect Tracker](#with-protect-tracker)). |
+| `live_delay` | `700` | Milliseconds the live picture is held back while Boxes is on, so the boxes can keep up with it. |
+| `live_offset` | `0` | A trim: milliseconds to draw the boxes later (+) or earlier (−). Not normally needed. |
+| `live_debug` | `false` | `true` writes on the live picture how the boxes are being timed (see [Live boxes](#live-boxes)). |
 | `zone_overlay` | `true` | `false` never shows zones (needs Protect Zones' overlay). |
-| `phone_landscape` | `true` | `false` keeps the dialog upright on a phone. |
+| `phone_landscape` | `true` | `false` keeps the live view upright on a phone. |
+
+The visual editor covers these except the camera lists, `alarm: false`, `alarm_name`, `alarm_modes`, `breakpoints` and options under `tracking:`, which stay YAML and are left as they are.
 
 ### Detection history
 
@@ -113,56 +132,90 @@ Takes no space on the page by itself; the camera wall creates one for its Histor
 type: custom:protect-tracking-card
 ```
 
-Watches every camera that recognises things and shows whichever one sees a person first. While standing by no video plays: it shows a still picture and a scanner animation.
+Watches every camera that recognises things, for people, and follows whoever turns up first. Standing by, it shows a still picture (or, with `warm`, the live one) under a scanner and says what it is watching for and when it last saw it. When someone appears it shows that camera live, zooms in on them and stays on them; when they have gone it stands by again.
+
+<!-- screenshot: the tracking card's visual editor, with the sound buttons -->
 
 | Option | Default | What it does |
 |---|---|---|
 | `camera` | all that recognise things | One camera entity to watch. |
 | `types` | `[person]` | What to react to: `person`, `vehicle`, `animal`, `package`. |
-| `show_others` | `false` | Also box other things, faintly. |
 | `name` | the camera's | Shown while standing by. |
-| `linger` | `10` | Seconds the picture stays after the last sighting. |
+| `linger` | `10` | Seconds the picture stays up after the subject was last seen, before standing by again. Also how long something other than a person may stand still before it counts as parked. |
+| `source` | `auto` | Whose positions it goes by: `auto`, `local` or `protect` (see [With Protect Tracker](#with-protect-tracker)). Without Protect Tracker, `auto` and `protect` are both Protect's own. |
+| `show_others` | `false` | Also box things of other kinds, faintly (and show them as dots while standing by). |
 | `standby` | `radar` | The standing-by look: `radar`, `pulse`, `scanline`, `static` or `none`. |
-| `accent` | the theme's primary colour | The scanner's colour. |
+| `static_grain` | `2` | With `standby: static`: the size of a speck, in px (1 to 8). |
+| `accent` | the theme's primary colour | The colour of the scanner, the brackets and the static. |
+| `box_style` | `reticle` | How the subject is marked: `reticle` (the scanner's brackets close onto it, follow it and let it go) or `plain` (a box, with what it is in chips below). |
+| `face_pip` | `auto` | `auto`: while a person is followed and their face is reported, the face enlarged in a corner. `off`: never. |
+| `split` | `off` | `2`, `3` or `4`: with several things moving at once, a pane for each, up to that many. |
+| `warm` | `false` | `true`: the live picture while standing by too, so it is there at once when someone appears. Costs a stream all the time the card is on screen. |
 | `snapshot` | `60` | Seconds between still pictures while standing by; `0` for none. |
-| `warm` | `false` | `true`: the live picture while standing by too (see below), so it is there at once when someone appears. |
-| `stream` | `auto` | `auto` (best stream on the home network, lighter one elsewhere), `high` or `low`. |
+| `stream` | `auto` | `auto` (the camera's best stream on the home network, the lighter one elsewhere), `high` or `low`. |
 | `max_zoom` | `4` | How far it zooms in. |
-| `box_style` | `reticle` | How the followed thing is marked: `reticle` (the scanner's brackets close onto it, follow it and let it go) or `plain` (a box, with what it is in chips below). |
-| `face_pip` | `auto` | `auto`: while a person is followed and their face is reported, the face is shown enlarged in a corner (see below). `off`: never. |
-| `split` | `off` | `2`, `3` or `4`: with several things moving at once, a pane for each, up to that many (see below). |
-| `aspect_ratio` | `1.7778` | Width / height, where the view does not set the height. |
-| `height` | – | A fixed height instead (`300`, `300px`, `40vh`). |
-| `live_delay`, `live_offset`, `live_debug` | `700`, `0`, `false` | As on the camera wall. |
-| `source` | `auto` | Whose positions it follows: `auto`, `local` or `protect` (see [Protect Tracker](#companions)). |
 | `sound` | `none` | A sound when it starts following: `ping` (a rising ping), `chirp` (a two-tone scanner chirp), `sweep` (a soft sweep) or `lock` (three blips and a tone). |
 | `sound_volume` | `0.5` | How loud, from `0` to `1`. |
 | `sound_gap` | `25` | Seconds the card stays quiet after it has sounded. |
+| `aspect_ratio` | `1.7778` | Width / height, where the view does not set the height. |
+| `height` | – | A fixed height instead (`300`, `300px`, `40vh`). In a *Sections* view the card can be dragged to any width and height. |
+| `live_delay`, `live_offset`, `live_debug` | `700`, `0`, `false` | As on the camera wall. |
 
-**Whom it follows.** The thing that wakes the card is its subject, and the view stays on that one alone: while it stands still, through short losses, and when its reports carry on under another id. Things standing still (a parked car, a bike on the porch) never wake the card, never become the subject and never widen the view. Whether a thing is moving is judged by its box as well as by what its reports say: one that only wobbles in place counts as standing still even when it is reported as moving, except in its first second and a half in view, so that someone walking in is seen at once. When the subject has gone and something else of a watched kind is moving, the view goes over to the nearest such thing, once; a tap on another box makes that one the subject. With nothing moving left the card stands by again after `linger`, whatever is parked in view. A subject that is not a person and hasn't moved for `linger` seconds has parked, and is let go. A subject is followed by its id only as far as that makes sense: if its box comes to rest where something of its kind has been standing (a tracker can hand a passing car's id to a parked car it drove past), or jumps across the picture, it counts as lost there and is not followed.
+The visual editor has all of these except `accent`, `snapshot`, `stream`, `max_zoom`, `sound_gap`, `aspect_ratio` and the three `live_…` options.
 
-**One look (`box_style: reticle`).** The standing-by scanner and the box round the followed thing are the same brackets, in the card's `accent` colour. On waking, the reticle flies to the thing and takes its shape while the sweep and rings fall in towards it, and the brackets close on it as the picture comes up. While following, a tag on the brackets says what it is, how sure, and which zones it is in. The edges are solid for a box made by Protect Tracker and dashed for one of UniFi Protect's; the brackets are dimmer on a thing standing still and breathe gently on a sure one; other moving things of a watched kind get faint brackets in their kind's colour, and a face a small set of its own. When the subject is lost the brackets stay where it was and pulse; when another becomes the subject they move across; and on standing by again the reticle opens back out from where the brackets were. With "reduce motion" set on the device there are no flights or pulsing. `box_style: plain` gives the earlier plain boxes.
+**Whom it follows.** The thing that wakes the card is its subject, and the view stays on that one alone: while it stands still, through short losses, and when its reports carry on under another id.
 
-**Face inset (`face_pip`).** While the card follows a person whose face is reported (by Protect Tracker as that person's face, or by UniFi Protect as a face inside the person's box), the face is shown enlarged in a corner, moving with the picture, with a thin line from the face to it. It is the playing video, cut out in the browser frame by frame; no second stream is opened. **Nothing of it is kept:** no picture is read back, saved or sent anywhere. It takes the corner the person is furthest from and moves if they walk under it; when the face is not reported for a moment (a head turned) it keeps its place for two seconds, then fades; it goes when the person is lost. It shows honest pixels, so how sharp it is depends on the stream: a face 3 % of the picture wide is about 115 px across on a 4K main stream and about 38 px on a 720p one, so it wants `stream: high` (`auto` uses the main stream on the home network). Never for vehicles or animals, not in a split view, and not on a card under 150 px.
+- Things standing still (a parked car, a bike on the porch) never wake the card, never become the subject and never widen the view. Whether a thing is moving is judged from its box as well as from what its reports say; only in its first second and a half in view is it taken at its word, so that someone walking in is seen at once.
+- When the subject has gone and something else of a watched kind is moving, the view goes over to the nearest such thing, once. A tap on another box makes that one the subject.
+- With nothing moving left, the card stands by again after `linger`, whatever is parked in view. A subject that is not a person and hasn't moved for `linger` seconds has parked, and is let go; a person standing still is kept.
+- If the subject's box comes to rest where something of its kind has been standing, or jumps across the picture, it counts as lost there and is not followed. (A tracker can hand a passing car's id to a parked car it drove past.)
 
-**Several things at once (`split`).** By default the card stays on its one subject. With `split: 2` (up to `4`), once a second thing of a watched kind has been moving for a second, the picture splits into panes, one each, every pane zoomed in on its own thing. A thing keeps its pane while it is there; with one left for a second and a half it is one view again. The panes are cut from the one stream that is playing, so no second stream is opened; it costs a small copy of the picture per pane per frame. Parked things get no pane, and a card smaller than about 260 × 150 px never splits. Two panes sit side by side in a wide card and one above the other in a tall one; three or four make a 2 × 2 grid.
+**The reticle look (`box_style: reticle`).** The standing-by scanner and the box round the subject are the same brackets, in the `accent` colour.
 
-**The `static` look.** Dense black-and-accent snow, like a dead channel in the card's `accent` colour (a speck is 2 px; `static_grain` sets it from 1 to 8, and a bigger card shows more of it, not bigger specks), with the picture in black and white added on top so that its bright parts glow through. With `warm: true` that picture is the live one; without it, the still that is refreshed now and then. The reticle rests on the static; when the card starts following, the static drops out in a few steps, and it floods back the same way on standing by. The texture is made once and only moved about, twenty times a second; it stops while the card is out of sight and holds still with "reduce motion".
+- *Acquire:* the reticle flies to the thing and takes its shape, the sweep and rings fall in towards it, and the brackets close on it as the picture comes up.
+- *Track:* a tag on the brackets says what it is, how sure, and which zones it is in, the same size on screen at any zoom. The thin edges between the brackets say who made the box: solid for Protect Tracker's, dashed for one of UniFi Protect's passed on by it, dotted for one only Protect Tracker has seen so far. The brackets are dimmer on a thing standing still and breathe gently on a sure one. Other moving things of a watched kind get faint brackets in their kind's colour, and a face a small set of its own.
+- *Lost:* the brackets stay where it was and pulse while the card waits.
+- *Hand-over:* when another thing becomes the subject, the brackets move across.
+- *Release:* on standing by again, the reticle opens back out from where the brackets were.
 
-**Live picture while standing by (`warm`).** With `warm: true` the camera's stream runs all the time the card is on screen, and standing by shows that live picture, dimmed, under the scanner and the text, in place of the still. When someone appears the same picture brightens and zooms in: nothing is swapped. Until the stream has a picture, and if it loses it, the still is shown. With `standby: none` the live picture is shown plain, not dimmed. The live picture is always shown whole, so in a card that isn't the camera's shape it has bars where the still would fill the card. With several cameras the first one is the one kept running. What it costs: a constant stream from Home Assistant and continuous video decoding on the device, which on a phone or tablet means battery, heat and mobile data; off screen or in a background tab the stream stops, as before.
+With "reduce motion" set on the device there are no flights or pulsing. `box_style: plain` gives plain boxes, with what the subject is in chips along the bottom.
 
-**Sound.** The sounds are made in the browser (no sound files) and play on the device showing the dashboard. A sound plays once when the card goes from standing by to following, not for every report, and not again until the card has stood by again and `sound_gap` has passed. Several tracking cards waking at the same moment make one sound. Things to know:
+**Standing-by looks (`standby`).** `radar` (a sweep over a grid), `pulse` (rings), `scanline`, `static`, or `none` (just the picture and the text). `static` is dense black-and-accent snow, like a dead channel, with the picture in black and white added on top so that its bright parts glow through; a speck is `static_grain` px on every size of card. With `warm: true` that picture is the live one, otherwise the still. When the card starts following, the static drops out in a few steps, and it floods back the same way. All looks stop moving while the card is out of sight, and hold still with "reduce motion".
+
+**Live picture while standing by (`warm`).** With `warm: true` the camera's stream runs all the time the card is on screen, and standing by shows that live picture, dimmed, under the scanner and the text. When someone appears the same picture brightens and zooms in: nothing is swapped. Until the stream has a picture, and if it loses it, the still is shown. With `standby: none` the live picture is shown plain. The live picture is always shown whole, so in a card that isn't the camera's shape it has bars where the still would fill the card. With several cameras the first one is the one kept running. What it costs: a constant stream from Home Assistant and continuous video decoding on the device, which on a phone or tablet means battery, heat and mobile data. Off screen or in a background tab the stream stops.
+
+**Face inset (`face_pip`).** While the card follows a person whose face is reported (by Protect Tracker as that person's face, or by UniFi Protect as a face inside the person's box), the face is shown enlarged in a corner, moving with the picture, with a thin line from the face to it.
+
+- It is the playing video, cut out in the browser frame by frame; no second stream is opened. **Nothing of it is kept:** no picture is read back, saved or sent anywhere.
+- Faces are not found in every frame. Between finds the face is taken to be where it was on the person and goes along with them, for up to two seconds; then the inset fades. It goes when the person is lost.
+- It takes the corner where it covers least of the person, and moves if they walk under it.
+- It shows honest pixels: a face 3 % of the picture wide is about 115 px across on a 4K main stream and about 38 px on a 720p one. So it wants `stream: high` (`auto` uses the main stream on the home network).
+- Never for vehicles or animals, not in a split view, and not on a card under 150 px.
+
+**Several things at once (`split`).** By default the card stays on its one subject. With `split: 2` (up to `4`), once a second thing of a watched kind has been moving for a second, the picture splits into panes, one each, every pane zoomed in on its own thing. A thing keeps its pane while it is there; with one left for a second and a half it is one view again, on that one. The panes are cut from the one stream that is playing. Parked things get no pane, and a card smaller than about 260 × 150 px never splits. Two panes sit side by side in a wide card and one above the other in a tall one; three or four make a 2 × 2 grid.
+
+<!-- screenshot: tracking card in split view with two moving things (split: 2, types: [vehicle]) -->
+
+**Sound.** The sounds are made in the browser (no sound files) and play on the device showing the dashboard. A sound plays once when the card goes from standing by to following, not for every report, and not again until the card has stood by again and `sound_gap` has passed. Several tracking cards waking at the same moment make one sound.
 
 - A browser plays no sound on a page until it has been clicked or typed on. Until then the speaker mark in the card's corner is highlighted; any click on the page clears it.
 - A click on the speaker mark turns the sound off or on for that browser (all tracking cards in it).
 - The card listens only while it is on screen and its tab is in front, so a tab in the background makes no sound.
-- In the card's editor, every click on a sound plays it, the one already picked included, and letting go of the volume slider plays the picked sound at the new volume. If nothing can be heard (sound turned off in this browser, or a browser without Web Audio), the editor says so beside the picker.
+- In the card's editor, every click on a sound plays it, the one already picked included, and letting go of the volume slider plays the picked sound at the new volume. If nothing can be heard, the editor says why beside the picker.
 
-In a *Sections* view the card can be dragged to any width and height.
+**"Last seen"** comes from the integration's own record (below), so it is the same on every device and counts what came by while no dashboard was open.
 
-The card's editor shows, for everything the config leaves out, what the card does by default. Those defaults are not written to the config; only what you change is.
+## Live boxes
 
-"Last seen" comes from the integration's own record (below), so it is the same on every device and counts people who came by while no dashboard was open.
+The boxes on the live picture (the wall's *Boxes*, and everything the tracking card draws) are placed by time: a box belongs to one moment of the camera's picture, and is drawn when that moment is on screen.
+
+- **By frame timestamps.** Over WebRTC, in a browser that reports them, every frame carries the camera's stream clock, and every position says what that clock was. The frame on screen is matched to its positions directly; no delay has to be guessed.
+- **By estimate.** Otherwise (HLS, or a browser that doesn't report frame timestamps) the card reckons how far behind the camera the picture is. This is fair on WebRTC and rough on HLS.
+- **Held back a little.** While boxes are shown, the picture is held back by `live_delay` (700 ms) so that positions, which arrive after their moment, are there in time. Between positions a box moves smoothly; when the next one is late it carries on as it was moving for a moment.
+- **Trims.** `live_offset` shifts the boxes later (+) or earlier (−). It should not be needed with frame timestamps.
+- **`live_debug: true`** writes one line on the live picture: how it is being timed, how far behind the picture is, and, after a minute or so of things moving, a check of the timing against the picture itself ("picture check: fits at … ms", which should match the "stamp" figure beside it).
+
+<!-- screenshot: live view with live_debug: true, showing the timing line -->
 
 ## The record of live sightings
 
@@ -172,29 +225,50 @@ The integration listens to the live tracking of every camera that recognises thi
 - the newest 100 sightings per camera and kind: start, end, peak confidence, the zones, loiter zones and lines it was in, and Protect's event ids;
 - when a camera's feed was not connected, so "nothing was seen" can be told from "nothing was listening".
 
-With the Protect Tracker integration in its local mode, what its own model sees is recorded here as well. Each sighting says who saw it (`source`: `protect` or `local`) and whether Protect reported the same thing too (`attached`, with Protect's track id and event ids); a thing reported by both is one sighting. So "Last seen" also counts what only the tracker saw, and such a sighting can be found afterwards (`source: local`, `attached: false`). Still times, kinds and places only: no pictures.
+With Protect Tracker in its local mode, what its own model sees is recorded as well. Each sighting says who saw it (`source`: `protect` or `local`), whether Protect reported the same thing too (`attached`, with Protect's track id and event ids), and when each first told of it (`local_at`, `protect_at`), so the tracker's head start can be read off. A thing reported by both is one sighting. A sighting only the tracker made is `source: local`, `attached: false`.
 
-It is kept in Home Assistant's `.storage` folder and survives a restart. To read it, call the websocket command `protect_detections/live/seen` (Developer tools → Actions cannot do this; use a card, a script against the websocket API, or the browser console). It takes optional `entity` (one camera), `types`, `limit` (default 50; `0` for the last-seen times only) and `since` (ms).
+It is times, kinds and places only: **no pictures**. It is kept in Home Assistant's `.storage` folder, saved at most every five minutes, and survives a restart.
 
-**What it costs:** one extra connection to the Protect console per camera that recognises things, open all the time, carrying a few small messages a second while that camera tracks something. **To turn it off:** Settings → Devices & services → Protect Detections → Configure. Live tracking is then listened to only while a dashboard shows it, and "Last seen" goes back to what each browser saw itself.
+To read it, call the websocket command `protect_detections/live/seen` (from a card, a script against the websocket API, or the browser console; Developer tools → Actions cannot). It takes optional `entity` (one camera), `types`, `source`, `limit` (default 50; `0` for the last-seen times only) and `since` (ms). Last seen has `seen` (by either), `moved`, `seen_protect`, `seen_local` and `seen_unattached`.
+
+**What it costs:** one extra connection to the Protect console per camera that recognises things, open all the time, carrying a few small messages a second while that camera tracks something. **To turn it off:** *Settings → Devices & services → Protect Detections → Configure*, "Keep a record of what live tracking sees". Live tracking is then listened to only while a dashboard shows it, nothing is recorded from either source, and "Last seen" goes back to what each browser saw itself.
+
+Another integration can add to the record with `hass.data["protect_detections"].record_live(camera_id, packet)`; Protect Tracker does.
 
 ## Companions
 
-Both are optional features of the cards, but see the note on Protect Zones.
-
-- **[Protect Zones](https://github.com/OnticEntia/protect-zones)** – **required** for this integration to load, because it provides the connection to Protect that both share. It also adds what the cards use for zones: the zone overlay in the camera dialog, zone editing for administrators, "occupied" badges on the wall, and zone names in the tracking card.
-- **[Protect Rules](https://github.com/OnticEntia/protect-rules)** – rules on top of detections. Its card uses this integration's clip player. Not needed otherwise.
-
-- **Protect Tracker** – optional. An integration that follows things frame by frame on your own machine and sends their positions in the same form as Protect's, as often as the camera has frames. With `source: auto` (the default) the cards use it when it is installed and Protect's own positions (about four a second) when it isn't; it is found by itself if installed later. On the tracking card and the wall's tracking tiles, auto is **local first**: what Protect Tracker's own model sees is acted on at once, without waiting for Protect to report it (Protect's details are added when it does). If that local feed isn't available, says its engine has gone, or falls silent for 3.5 seconds, the card goes over to Protect Tracker's mixed feed by itself, and back once the local feed has been steady for 3 seconds. The price: something only Protect reports, which the model never sees, does not wake a card on auto while the local feed is in use. The wall's live view keeps showing the best of both on auto. `source: local` asks it for its local mode (what its own model sees, with Protect's details added when Protect reports the same thing), and the card says so if it is missing or too old for that; `source: protect` never uses it. In the camera wall's live view a chip beside *Boxes* shows the choice and switches it with a click, remembered in the browser: **Auto** (Protect Tracker's boxes where it has them, Protect's own otherwise, drawn dashed), **Local** (what Protect Tracker's own model sees, under its own judgement, whether or not Protect reports it; a thing Protect hasn't reported yet has dotted edges; the chip says so when the model has nothing, when Protect Tracker isn't installed or its engine isn't running, or when it is a version from before this mode) and **UniFi** (only Protect's own, nothing from Protect Tracker). The chip appears once Protect Tracker has been seen. On the tracking card, `source: local` likewise reacts only to what the model made, and a small "local" or "Protect" mark shows whose positions it is following. A face it finds on a person it is following is drawn as a small box with that person; it never wakes a tracking card by itself.
+- **[Protect Zones](https://github.com/OnticEntia/protect-zones)** – **required** for this integration to load, because it provides the connection to Protect that both share. It also adds what the cards use for zones: the zone overlay in the live view, zone editing for administrators, "occupied" badges on the wall, and zone names in the tracking card.
+- **[Protect Rules](https://github.com/OnticEntia/protect-rules)** – optional. Rules on top of detections. Its card uses this integration's clip player.
+- **Protect Tracker** – optional. An integration that follows things frame by frame on your own machine. See below.
 
 HACS installs one repository at a time and does not install Protect Zones for you. If it is missing, adding Protect Detections stops with "Protect Zones isn't installed"; an entry that already exists fails to set up with the same message and a notice appears under **Settings → Repairs**. Install Protect Zones, restart Home Assistant, and reload Protect Detections.
+
+### With Protect Tracker
+
+UniFi Protect reports where things are about four times a second, and only once it has decided something is there. Protect Tracker runs its own model on the camera's picture and reports as often as the camera has frames. It has two modes: a **local** one, in which it tells of a thing as soon as its own model sees it and adds Protect's details when Protect reports the same thing; and a **mixed** one, in which a thing is told of once Protect has reported it and the model then refines its box. Nothing here requires it; the cards find it by themselves, also when it is installed later.
+
+`source` chooses whose positions a card goes by:
+
+| `source` | Tracking card and tracking tiles | The wall's live view (the chip beside *Boxes*) |
+|---|---|---|
+| `auto` (default) | **Local first.** The tracker's local mode, so the card wakes when its model first sees someone. Its mixed mode while the local one isn't available, says its engine is gone, or has been silent for 3.5 s; back once it has been steady for 3 s. Protect's own with no tracker. | *Auto:* the tracker's mixed mode: its boxes where it has them, Protect's own otherwise (dashed). |
+| `local` | Only the tracker's local mode. If it is missing, too old for that mode, or its engine isn't running, the card says so and does not use anything else. | *Local:* the same. A thing Protect hasn't reported yet has dotted edges. The chip says when the model has nothing in view, or why there is no local feed. |
+| `protect` | Only UniFi Protect's own. | *UniFi:* the same. |
+
+- **The one trade-off of local first:** while the local feed is in use, something only Protect reports, which the model never sees, does not wake a tracking card.
+- In the live view the chip switches with a click and is remembered in the browser; the wall's `source` option is where it starts. It appears once Protect Tracker has been seen.
+- On the tracking card a small "local" or "Protect" mark shows whose positions it is following, when there is a choice.
+- A face Protect Tracker finds on a person is drawn with that person and never wakes a card by itself.
+- Without Protect Tracker nothing changes: `auto` and `protect` are Protect's own, and no chip or mark is shown. (`local` asks for the tracker by name, so a card set to it says the tracker isn't installed.)
 
 ## Privacy and security
 
 - **Everything stays local.** The integration talks only to your Protect console, through the UniFi Protect integration's session. Nothing is sent anywhere else.
-- **It relays camera data to dashboards.** Any logged-in Home Assistant user can see detections, object photos, recorded clips and live positions through this integration, and can talk through a camera's speaker. It does not add per-user restrictions of its own. Give dashboard access accordingly.
-- **A record of sightings is kept.** When and where (which zones) each kind of thing was seen by live tracking is stored in Home Assistant's `.storage` folder: times, kinds and zone numbers, no pictures. See [The record of live sightings](#the-record-of-live-sightings) to turn it off.
-- **Clips are written to disk.** A played clip is exported from Protect into the system's temporary folder on the Home Assistant machine. Only the newest 24 clips are kept (600 MB at most), and the folder is emptied when the integration starts and stops.
+- **No footage or stills are stored.** What the integration keeps is the record of sightings: times, kinds, zone numbers and ids. See [The record of live sightings](#the-record-of-live-sightings) to turn it off.
+- **Live pictures are only shown.** The tracking card's face inset and split view are the playing video, cut out in the browser; nothing is read back or saved. With `live_debug: true` the timing check compares small copies of frames in the browser's memory; they are not kept or sent either.
+- **It relays camera data to dashboards.** Any logged-in Home Assistant user can see detections, object photos, recorded clips, live positions and the record of sightings through this integration, and can talk through a camera's speaker. It does not add per-user restrictions of its own. Give dashboard access accordingly.
+- **Clips are written to disk, briefly.** A played clip from the detection history is exported from Protect into the system's temporary folder on the Home Assistant machine. Only the newest 24 clips are kept (600 MB at most), and the folder is emptied when the integration starts and stops.
+- **What the browser remembers:** small preferences only (whether Boxes is on, the *Auto / Local / UniFi* choice, sound turned off, and a fallback "last seen" time). Your wall arrangement and tile options are kept in your Home Assistant user data.
 - **Talk** sends your browser's microphone audio to the camera's speaker. Browsers only allow the microphone over https; on a plain http address the wall opens a small talk window on your https address instead.
 - **The card files are public**, like Home Assistant's own frontend files: they contain code only, no data, and are served without a login.
 - **Nothing is written to Protect** by this integration. (Zone editing is done by Protect Zones and is limited to administrators there.)
@@ -205,22 +279,39 @@ HACS installs one repository at a time and does not install Protect Zones for yo
 |---|---|
 | "Set up the UniFi Protect integration first" | The built-in UniFi Protect integration must be set up and loaded. |
 | "Protect Zones isn't installed" (when adding, on the entry, or under Repairs) | Install Protect Zones, restart Home Assistant, then add or reload Protect Detections. |
-| "Custom element doesn't exist" for a card | Refresh the browser (clear its cache if needed) after installing or updating. Check that the integration is loaded. |
+| "Custom element doesn't exist" for a card | Reload the page after installing or updating. Check that the integration is loaded. |
+| A new option or look does nothing, or a phone shows the old card | The page is still running the cards it loaded before. Reload it; in the Home Assistant app, pull down to refresh or use *Settings → Companion app → Debugging → Reset frontend cache*. |
 | A card shows twice-defined errors in the browser console | Remove old dashboard resources pointing at these cards; the integration loads them now. |
-| No Boxes button, no tracking tile | The camera must recognise things (smart detections), and the integration must be a version with live tracking. |
-| Boxes sit ahead of or behind the picture | The boxes are right in place; what can be off is time. Set `live_debug: true` and read the line on the picture. "by frame timestamps" (WebRTC in a browser that reports them) goes by each frame's own time; with `live_debug` on, the card then also checks the timing against the picture ("picture check: fits at … ms", after a minute or so of things moving) and that figure should match the "stamp" figure beside it. "by estimate" is a best guess: fair on WebRTC, rough on HLS, where `live_offset` is the trim (positive if the boxes run ahead of things, negative if they trail). |
+| No Boxes button, no tracking tile | The camera must recognise things (smart detections). |
+| Boxes sit ahead of or behind the picture | The boxes are right in place; what can be off is time. Set `live_debug: true` and read the line on the picture (see [Live boxes](#live-boxes)). "by frame timestamps" needs no adjusting. "by estimate" is a best guess: use `live_offset` (positive if the boxes run ahead of things, negative if they trail). |
+| No sound from the tracking card | A browser plays no sound until the page has been clicked; the speaker mark in the card's corner is highlighted until then. The same mark turns sound off for that browser: click it. A background tab makes no sound. |
+| The tracking card didn't react to someone | Ask `protect_detections/live/seen` for that time. A sighting of the right kind means it was reported and the card wasn't listening (it listens only while on screen). A gap means the feed was down. With `source: auto` or `local` and Protect Tracker in use, something only Protect reported does not wake the card. |
+| The tracking card reacts late | Without Protect Tracker it can only react once Protect reports. With it, `source: auto` reacts when the tracker's model first sees the thing. |
+| "Protect Tracker's engine isn't running" / "…is not connected" / "has gone quiet" | The tracker's engine is down or not serving that camera. A card on `auto` carries on with the next best feed by itself; one on `local` waits. |
+| "This Protect Tracker has no local mode yet" / the chip reads "Local · older tracker" | Update Protect Tracker. Meanwhile its model's boxes from the mixed mode are used. |
+| The chip reads "Local · nothing now" | The tracker's model has nothing in view while Protect does. Switch to *Auto* or *UniFi* to see Protect's boxes. |
+| The face inset is a blur | The stream is too small for the face. Use `stream: high` on the tracking card. |
 | Clips do not play | The camera must be recording in Protect for the time of the detection. Some browsers cannot play HEVC; the card then asks for an H.264 copy, which takes a little longer. |
 | No talk button | The camera needs a speaker, and the page must be on https (or the talk window is used). |
-| The tracking card didn't react to someone | Ask `protect_detections/live/seen` for that time. A sighting of the right kind means Protect reported them and the card wasn't listening (it listens only while on screen). A gap means the feed was down. Neither means Protect's live tracking didn't report them. |
 | Something stopped working after a Protect update | Protect's undocumented interfaces may have changed. Please open an issue with your Protect and Home Assistant versions. |
 
 ## Development
 
-The cards are plain JavaScript modules in `custom_components/protect_detections/frontend/`, with no build step. Their tests run in Node without a browser:
+The cards are plain JavaScript modules in `custom_components/protect_detections/frontend/`, with no build step. The tests need no browser and no Home Assistant:
 
 ```bash
 node tests/cards.test.mjs
 ```
+
+```bash
+python tests/test_sightings.py
+```
+
+```bash
+python tests/test_interface.py
+```
+
+`hub.smart_cameras()`, `hub.live.subscribe(camera_id, send)` and `hub.record_live(camera_id, packet)` on `hass.data["protect_detections"]` are used by other integrations and are kept stable; the last test checks them.
 
 ## Licence
 
