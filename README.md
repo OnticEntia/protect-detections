@@ -16,17 +16,19 @@ It is a companion to Home Assistant's built-in **UniFi Protect** integration. It
 
 | | |
 |---|---|
-| ![The camera wall: six feeds and a tracking tile standing by](docs/images/camera-wall.webp) | ![A camera's live dialog with its zones drawn over the picture](docs/images/live-view-zones.webp) |
-| The camera wall, with a tracking tile standing by | A camera's live dialog, with zones |
+| ![The camera wall: six feeds and a tracking tile standing by](docs/images/camera-wall.webp) | ![A camera's live view with its zones, a box on a passing car, and the chip that picks whose boxes to show](docs/images/live-view-zones.webp) |
+| The camera wall, with a tracking tile standing by | A camera's live view: zones, live boxes, and the Auto / Local / UniFi chip |
 | ![The detection history as a grid of object photos](docs/images/history-grid.webp) | ![A detection's recording playing, with a box and label on a car](docs/images/history-clip.webp) |
 | The detection history | A detection's recording, with Protect's boxes |
+
+![The tracking card standing by in the static look: the live picture in monochrome through red and black static, with the reticle at rest](docs/images/tracking-standby.webp)
+
+The tracking card standing by, in the `static` look.
 
 Camera and zone names are painted out in these pictures.
 
 <!-- screenshot: tracking card standing by, radar look (default options) -->
-<!-- screenshot: tracking card standing by, static look (standby: static, warm: true) -->
 <!-- screenshot: tracking card following a person: reticle brackets, tag, face inset (default options; a person in view) -->
-<!-- screenshot: camera wall live view with Boxes on and the Auto / Local / UniFi chip -->
 
 ## Requirements
 
