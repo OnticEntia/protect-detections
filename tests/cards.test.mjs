@@ -1151,7 +1151,8 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const mid = (cv) => { const d = lastDraw(cv); return Math.round(d[2] + d[4] / 2); };
   const xa = (100 + (c.T - 300) * 0.1 + 50) * 1.6, xb = (800 - (c.T - 300) * 0.05 + 50) * 1.6;
   ok(Math.abs(mid(pa) - xa) < 60 && Math.abs(mid(pb) - xb) < 60 && lastDraw(pa)[4] < 1600 / 2, `each pane is on its own car, zoomed in (middles ${mid(pa)} and ${mid(pb)} of 1600; cars at ${Math.round(xa)} and ${Math.round(xb)})`);
-  ok(pa._g.calls.some((x) => x[0] === "strokeRect") && pa._g.calls.some((x) => x[0] === "fillText" && /Vehicle/.test(x[1])), "with its box and what it is");
+  ok(!pa._g.calls.some((x) => x[0] === "strokeRect") && pa._g.calls.some((x) => x[0] === "fillText" && /Vehicle/.test(x[1])), "with its brackets and what it is (no rectangle drawn round it)");
+  { const pl = await mkc({ types: ["vehicle"], split: 2, box_style: "plain" }); pl.run(400, two); withVideo(pl); pl.run(2000, two); ok(pl._root.querySelector(".panes").children[0]._g.calls.some((x) => x[0] === "strokeRect"), "(box_style: plain keeps the full rectangle, in the panes as elsewhere)"); pl.disconnectedCallback(); }
   ok(pa._g.calls.filter((x) => x[0] === "lineTo").length >= 8 && pa._g.calls.some((x) => x[0] === "stroke"), "in the panes too the box is the brackets (corners drawn strong)");
   ok(!c._root.querySelector(".zoomer").style.transform, "the picture underneath is left whole");
   // the same two, said in the other order, for a while: no swapping
@@ -1249,7 +1250,12 @@ ok(w._built && !w._building, "next good config builds after a failure");
     ok(c._active.mainEl === m2 && m2.className.includes("hop") && c._active.els.get("b") === m2 && c._active.els.get("a") !== m2, "a tap on another: the brackets hop across (marked so for a moment), and the first gets a light box of its own");
     c.run(500, (t) => [walker2("a", t), { id: "b", coord: [700 + (t % 200 ? 12 : 0), 300, 60, 180], objectType: "person", stationary: false }]); ok(!m2.className.includes("hop"), "the hop is over a moment later");
     c.disconnectedCallback();
-    // a box of Protect's own, passed on by Protect Tracker: dashed edges
+    ok(/\n  \.chip\[hidden\] \{ display: none; \}/.test(fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8")), "a chip that is hidden is really not shown (the empty warning pill beside the camera's name)");
+    // the reticle look is four corners and nothing else: no edge joins them in any state
+    { const sheet = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8"); const rules = sheet.match(/\.bs-reticle[^{]*\.box[^{]*::after[^{]*\{[^}]*\}/g) || [];
+      ok(rules.length === 0 && !/\.bs-reticle \.pip \{ outline/.test(sheet) && /\.bs-reticle \.box \{ border-color: transparent/.test(sheet), "reticle: only the four corner brackets are drawn (no thin edge between them on the subject, the others, faces or the inset): " + rules.length + " edge rules");
+      ok(/\.bs-reticle \.box\.seen \{ --bt: calc\(1\.5px/.test(sheet) && /\.bs-reticle \.box\.seen::before \{ opacity: \.65; \}/.test(sheet), "a thing only seen so far is told by thinner, lighter corners"); }
+    // a box of Protect's own, passed on by Protect Tracker (the mark on the card says whose it is; the brackets are the same)
     c = await mkc({ types: ["person"] }); c.run(1500, (t) => [walker2("u", t)]); c._active.sub.using = "tracker"; c.frame(); ok(c._active.mainEl.className.includes("passed"), "Protect's own box while Protect Tracker is in use: marked as passed on"); c._active.sub.lt.tracks.get("u").local = true; c.frame(); ok(!c._active.mainEl.className.includes("passed"), "one made on this machine: not"); c.disconnectedCallback();
     // less motion asked for: no flights
     win.matchMedia = () => ({ matches: true });

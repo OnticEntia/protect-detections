@@ -102,10 +102,10 @@
  *            the sweep and rings fall in towards it; the brackets close on
  *            it as the picture comes up (with the sound, if one is set)
  *   track    the brackets follow it, a tag on them saying what it is, how
- *            sure, and where (zones). Solid edges for a box made on this
- *            machine, dashed for one of UniFi Protect's, dotted for one
- *            only Protect Tracker has seen so far (its local mode: Protect
- *            hasn't reported it); dimmer when it
+ *            sure, and where (zones). Four corners only: nothing is drawn
+ *            between them. Thinner and lighter for a thing only Protect
+ *            Tracker has seen so far (its local mode: Protect hasn't
+ *            reported it); dimmer when it
  *            stands still; breathing gently on a sure one. A face found on
  *            it is a small bracket set; other moving things of a watched
  *            kind are faint brackets in their kind's colour
@@ -411,24 +411,20 @@ const STYLE = `
       linear-gradient(var(--bc), var(--bc)) bottom left / var(--bl) var(--bt) no-repeat, linear-gradient(var(--bc), var(--bc)) bottom left / var(--bt) var(--bl) no-repeat,
       linear-gradient(var(--bc), var(--bc)) bottom right / var(--bl) var(--bt) no-repeat, linear-gradient(var(--bc), var(--bc)) bottom right / var(--bt) var(--bl) no-repeat;
     filter: drop-shadow(0 0 calc(3px * var(--k, 1)) color-mix(in srgb, var(--bc) 65%, transparent)); }
-  /* thin edges between the brackets: solid for a box made here, dashed for one of Protect's */
-  .bs-reticle .box::after { content: ""; position: absolute; inset: 0; border: calc(1px * var(--k, 1)) solid color-mix(in srgb, var(--bc) 32%, transparent); }
-  .bs-reticle .box.passed::after { border-style: dashed; }
-  /* seen by the local model only so far (Protect hasn't reported it): dotted edges, lighter brackets; confirmed: as usual */
-  .bs-reticle .box.seen::after { border-style: dotted; }
+  /* (the four corners and nothing between them: a line joining them reads as a second box) */
+  /* seen by the local model only so far (Protect hasn't reported it): thinner, lighter brackets; confirmed: as usual */
   .bs-reticle .box.seen { --bt: calc(1.5px * var(--k, 1)); }
+  .bs-reticle .box.seen::before { opacity: .65; }
   .bs-reticle .box.still::before { opacity: .55; }
   .bs-reticle .box.main.sure:not(.still):not(.lostb)::before { animation: trk-breathe 2.8s ease-in-out infinite; }
   .bs-reticle .box.main.acq::before { animation: trk-close .38s cubic-bezier(.2,.9,.25,1.1) 1 both; }
   .bs-reticle .box.main.hop { transition: left .3s ease, top .3s ease, width .3s ease, height .3s ease; }
   .bs-reticle .box.main.lostb::before { animation: trk-lost .9s ease-in-out infinite; }
-  .bs-reticle .box.main.lostb::after, .bs-reticle .box.main.lostb .tag { display: none; }
+  .bs-reticle .box.main.lostb .tag { display: none; }
   .bs-reticle .box.also { opacity: .6; --bt: calc(1.5px * var(--k, 1)); }
   .bs-reticle .box.other { opacity: .4; --bt: calc(1px * var(--k, 1)); border-style: none; }
-  .bs-reticle .box.other::after { border-style: dotted; }
   .bs-reticle .box.part { --bc: var(--tracking-accent, var(--primary-color, #e0102a)); --bt: calc(1.5px * var(--k, 1)); --bl: 34%; }
   .bs-reticle .box.part::before { inset: 0; filter: none; }
-  .bs-reticle .box.part::after { display: none; }
   /* the tag: what it is, on the brackets, the same size at any zoom; under the box when there is no room above */
   .bs-reticle .box.main .tag { display: block; position: absolute; left: calc(-3px * var(--k, 1)); bottom: 100%; margin-bottom: calc(7px * var(--k, 1)); white-space: nowrap; pointer-events: none;
     font-size: calc(11px * var(--k, 1)); line-height: 1.35; font-weight: 600; letter-spacing: .02em; color: #fff; padding: calc(1px * var(--k, 1)) calc(6px * var(--k, 1));
@@ -583,7 +579,6 @@ const STYLE = `
   .pip.on { visibility: visible; opacity: 1; transition: opacity .25s; }
   .pip canvas { display: block; width: 100%; height: 100%; }
   .bs-plain .pip { outline: 1px solid rgba(255,255,255,.75); border-radius: 3px; overflow: hidden; }
-  .bs-reticle .pip { outline: 1px solid color-mix(in srgb, var(--bc) 35%, transparent); }
   .bs-reticle .pip::before { content: ""; position: absolute; inset: -3px; pointer-events: none;
     background:
       linear-gradient(var(--bc), var(--bc)) top left / 22% 2px no-repeat, linear-gradient(var(--bc), var(--bc)) top left / 2px 22% no-repeat,
@@ -603,7 +598,7 @@ const STYLE = `
   .chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c, #e0102a); }
   .chip.live i { animation: pulse 1.2s infinite; }
   .chip.src { font-weight: 500; font-size: 11px; padding: 2px 7px; opacity: .75; }
-  .chip.src[hidden] { display: none; }
+  .chip[hidden] { display: none; } /* (the warning chip showed as an empty pill: display above beat the hidden attribute) */
   .chip.warn { background: color-mix(in srgb, var(--warning-color, #fbbf24) 80%, #000); color: #000; }
   @keyframes pulse { 50% { opacity: .25; } }
 `;
@@ -769,11 +764,7 @@ class ProtectTrackingCard extends HTMLElement {
       const [bx, by, bw, bh] = [(((x / 1000) * vw - sx) / sw) * cw, (((y / 1000) * vh - sy) / sh) * ch, (((w / 1000) * vw) / sw) * cw, (((h / 1000) * vh) / sh) * ch];
       g.strokeStyle = color;
       if (this._boxStyle() === "reticle") {
-        // the same brackets as in one view: thin edges, the corners strong
-        g.globalAlpha = 0.32;
-        g.lineWidth = dpr;
-        g.strokeRect(bx, by, bw, bh);
-        g.globalAlpha = 1;
+        // the same four corners as in one view, and nothing between them
         g.lineWidth = 2 * dpr;
         const [lx, ly] = [bw * 0.26, bh * 0.26];
         g.beginPath();

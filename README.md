@@ -175,12 +175,12 @@ The visual editor has all of these except `accent`, `snapshot`, `stream`, `max_z
 **The reticle look (`box_style: reticle`).** The standing-by scanner and the box round the subject are the same brackets, in the `accent` colour.
 
 - *Acquire:* the reticle flies to the thing and takes its shape, the sweep and rings fall in towards it, and the brackets close on it as the picture comes up.
-- *Track:* a tag on the brackets says what it is, how sure, and which zones it is in, the same size on screen at any zoom. The thin edges between the brackets say who made the box: solid for Protect Tracker's, dashed for one of UniFi Protect's passed on by it, dotted for one only Protect Tracker has seen so far. The brackets are dimmer on a thing standing still and breathe gently on a sure one. Other moving things of a watched kind get faint brackets in their kind's colour, and a face a small set of its own.
+- *Track:* four corner brackets and nothing between them, with a tag saying what it is, how sure, and which zones it is in, the same size on screen at any zoom. The brackets are thinner and lighter on a thing only Protect Tracker has seen so far, dimmer on a thing standing still, and breathe gently on a sure one. Other moving things of a watched kind get faint brackets in their kind's colour, and a face a small set of its own. Whose positions they are is said by the small "local" / "Protect" mark, not by the brackets.
 - *Lost:* the brackets stay where it was and pulse while the card waits.
 - *Hand-over:* when another thing becomes the subject, the brackets move across.
 - *Release:* on standing by again, the reticle opens back out from where the brackets were.
 
-With "reduce motion" set on the device there are no flights or pulsing. `box_style: plain` gives plain boxes, with what the subject is in chips along the bottom.
+With "reduce motion" set on the device there are no flights or pulsing. `box_style: plain` gives full rectangles, with what the subject is in chips along the bottom.
 
 **Standing-by looks (`standby`).** `radar` (a sweep over a grid), `pulse` (rings), `scanline`, `static`, or `none` (just the picture and the text). `static` is dense black-and-accent snow, like a dead channel, with the picture in black and white added on top so that its bright parts glow through; a speck is `static_grain` px on every size of card. With `warm: true` that picture is the live one, otherwise the still. When the card starts following, the static drops out in a few steps, and it floods back the same way. All looks stop moving while the card is out of sight, and hold still with "reduce motion".
 
@@ -254,7 +254,7 @@ UniFi Protect reports where things are about four times a second, and only once 
 | `source` | Tracking card and tracking tiles | The wall's live view (the chip beside *Boxes*) |
 |---|---|---|
 | `auto` (default) | **Local first.** The tracker's local mode, so the card wakes when its model first sees someone. Its mixed mode while the local one isn't available, says its engine is gone, or has been silent for 3.5 s; back once it has been steady for 3 s. Protect's own with no tracker. | *Auto:* the tracker's mixed mode: its boxes where it has them, Protect's own otherwise (dashed). |
-| `local` | Only the tracker's local mode. If it is missing, too old for that mode, or its engine isn't running, the card says so and does not use anything else. | *Local:* the same. A thing Protect hasn't reported yet has dotted edges. The chip says when the model has nothing in view, or why there is no local feed. |
+| `local` | Only the tracker's local mode. If it is missing, too old for that mode, or its engine isn't running, the card says so and does not use anything else. A thing Protect hasn't reported yet has thinner, lighter brackets. | *Local:* the same. A thing Protect hasn't reported yet has a dotted box. The chip says when the model has nothing in view, or why there is no local feed. |
 | `protect` | Only UniFi Protect's own. | *UniFi:* the same. |
 
 - **The one trade-off of local first:** while the local feed is in use, something only Protect reports, which the model never sees, does not wake a tracking card.
