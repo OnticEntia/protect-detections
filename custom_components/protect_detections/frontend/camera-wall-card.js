@@ -4233,7 +4233,7 @@ const WALL_FORM = [
   { name: "layout", selector: { text: {} } },
   { name: "aspect_ratio", selector: { number: { min: 0.5, max: 3, step: 0.0001, mode: "box" } } },
   { name: "live_tracks", selector: { boolean: {} } },
-  { name: "source", selector: { select: { options: [{ value: "auto", label: "Auto: Protect Tracker's when installed, else UniFi Protect's" }, { value: "local", label: "Local: only Protect Tracker's own" }, { value: "protect", label: "UniFi: only UniFi Protect's own" }] } } },
+  { name: "source", selector: { select: { options: [{ value: "auto", label: "Auto: the live view shows the best of both; the tracking tiles go by Protect Tracker's own sightings first" }, { value: "local", label: "Local: only Protect Tracker's own" }, { value: "protect", label: "UniFi: only UniFi Protect's own" }] } } },
   { name: "live_delay", selector: { number: { min: 0, max: 3000, step: 50, mode: "box", unit_of_measurement: "ms" } } },
   { name: "live_offset", selector: { number: { min: -3000, max: 3000, step: 10, mode: "box", unit_of_measurement: "ms" } } },
   { name: "live_debug", selector: { boolean: {} } },

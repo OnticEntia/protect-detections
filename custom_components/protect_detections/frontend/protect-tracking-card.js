@@ -44,11 +44,13 @@
  *   live_delay: 700                         # ms the picture is held back so the boxes
  *                                           # line up with it (see protect-live.js)
  *   live_offset: 0                          # ms to place the boxes later (+) / earlier (-)
- *   source: auto                            # whose positions: auto (the Protect Tracker
- *                                           # integration's when it is installed, else
- *                                           # Protect's own) | local (what Protect
- *                                           # Tracker's own model sees, whether or not
- *                                           # Protect reports it) | protect
+ *   source: auto                            # whose positions: auto (local first: what the
+ *                                           # Protect Tracker integration's own model
+ *                                           # sees, at once; its mixed feed while that
+ *                                           # isn't there or has gone quiet; Protect's
+ *                                           # own with no Protect Tracker) | local (only
+ *                                           # the first of those) | protect (only
+ *                                           # Protect's own)
  *   box_style: reticle                      # how the followed thing is marked: reticle
  *                                           # (the scanner's own brackets close onto it,
  *                                           # follow it and let it go) | plain (a box)
@@ -1874,7 +1876,7 @@ class ProtectTrackingCard extends HTMLElement {
 // a sound on every click on it, the one already picked included.
 
 // What the card does where the config says nothing (as setConfig has it).
-const EDIT_DEFAULTS = { static_grain: 2, face_pip: "auto", box_style: "reticle", types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, split: "off", sound: "none", sound_volume: 0.5 };
+const EDIT_DEFAULTS = { source: "auto", static_grain: 2, face_pip: "auto", box_style: "reticle", types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, split: "off", sound: "none", sound_volume: 0.5 };
 const EDIT_FORM = [
   { name: "camera", selector: { entity: { domain: "camera", integration: "unifiprotect" } } },
   { name: "name", selector: { text: {} } },
@@ -1885,13 +1887,18 @@ const EDIT_FORM = [
   { name: "show_others", selector: { boolean: {} } },
   { name: "warm", selector: { boolean: {} } },
   { name: "box_style", selector: { select: { options: [{ value: "reticle", label: "Reticle: the scanner's brackets close onto it" }, { value: "plain", label: "Plain box" }] } } },
+  { name: "source", selector: { select: { options: [
+    { value: "auto", label: "Auto: Protect Tracker's own sightings first; its mixed feed, or UniFi Protect's, when those aren't there" },
+    { value: "local", label: "Local: only Protect Tracker's own sightings" },
+    { value: "protect", label: "UniFi: only UniFi Protect's own" },
+  ] } } },
   { name: "face_pip", selector: { select: { options: [{ value: "auto", label: "Shown while a followed person's face is reported" }, { value: "off", label: "Off" }] } } },
   { name: "split", selector: { select: { options: [{ value: "off", label: "One view, on the subject" }, { value: "2", label: "Up to 2 panes" }, { value: "3", label: "Up to 3 panes" }, { value: "4", label: "Up to 4 panes" }] } } },
   { name: "height", selector: { text: {} } },
 ];
 const EDIT_LABELS = { camera: "Camera (empty: every camera that recognises things)", name: "Name (empty: the camera's)", types: "Watch for", standby: "Standing-by look",
   linger: "Stay after last seen", show_others: "Also box other things", warm: "Live picture while standing by (keeps the stream running)", height: "Height, e.g. 300px (empty: by shape)",
-  split: "Several things moving at once", static_grain: "Static: size of a speck", box_style: "How the followed thing is marked", face_pip: "Face inset (the face enlarged in a corner)" };
+  split: "Several things moving at once", source: "Whose sightings it goes by (with Auto and Local, something only UniFi Protect reports doesn't wake it)", static_grain: "Static: size of a speck", box_style: "How the followed thing is marked", face_pip: "Face inset (the face enlarged in a corner)" };
 const EDIT_STYLE = `
   :host { display: block; }
   .sound { margin-top: 20px; }
@@ -2092,12 +2099,14 @@ if (!customElements.get("protect-tracking-card-editor")) customElements.define("
 
 // (the camera wall brings this file in too, for its tracking tiles: whichever
 // comes first defines the card)
-// `source: auto` with Protect Tracker installed: its ordinary mode, in which
-// a thing is told of once Protect has reported it (false), or its local
-// mode, in which its own model's sightings come at once and Protect's
-// details are added in flight (true). With true, what Protect reports and
-// the model never sees is not shown.
-ProtectTrackingCard.autoLocal = false;
+// `source: auto` is local first: Protect Tracker's local mode, in which its
+// own model's sightings come at once and Protect's details are added in
+// flight; its ordinary mode while that isn't there or has gone quiet; and
+// Protect's own positions with no Protect Tracker. (false: its ordinary
+// mode, in which a thing is told of only once Protect has reported it.)
+// The price of local first: what Protect reports and the model never sees
+// doesn't wake the card.
+ProtectTrackingCard.autoLocal = true;
 ProtectTrackingCard.sound = Sound; // (for the tests)
 ProtectTrackingCard.soundVoices = soundVoices;
 ProtectTrackingCard.editDefaults = EDIT_DEFAULTS;

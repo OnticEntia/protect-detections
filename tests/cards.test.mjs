@@ -42,6 +42,7 @@ class El extends Target {
   getContext() { return (this._g ||= new Proxy({ calls: [], measureText: () => ({ width: 40 }) }, { get: (o, k) => (k in o ? o[k] : (...args) => { o.calls.push([k, ...args]); }), set: (o, k, v) => { o[k] = v; return true; } })); } insertAdjacentHTML() {} load() {} pause() {} play() { return Promise.resolve(); }
   canPlayType() { return "probably"; }
 }
+// (long waits, of 4 s and more, are never waited for in these tests, and don't keep the run alive)
 const win = new Target(); const timers = new Set(); const revoked = [];
 const defs = {};
 const ctx = { window: win, document: { createElement: (t) => (defs[t] ? new defs[t]() : new El()), createTextNode: (t) => Object.assign(new El(), { textContent: t, isText: true }), createElementNS: (ns, t) => Object.assign(new El(), { tagName: t, attrs: {} }), body: new El() }, HTMLElement: El, CustomEvent: Ev, Event: Ev,
@@ -49,7 +50,7 @@ const ctx = { window: win, document: { createElement: (t) => (defs[t] ? new defs
   localStorage: { store: {}, getItem(k) { return k in this.store ? this.store[k] : null; }, setItem(k, v) { this.store[k] = String(v); } }, location: { hostname: "192.168.1.10", origin: "http://x", protocol: "http:" },
   navigator: { userAgent: "" }, console, performance, Date, Math, JSON, Promise, URLSearchParams, URL: Object.assign(URL, { createObjectURL: () => "blob:x", revokeObjectURL: (u) => revoked.push(u) }),
   setInterval: (f) => { const t = { f }; timers.add(t); return t; }, clearInterval: (t) => timers.delete(t),
-  setTimeout: (f, ms) => setTimeout(f, ms >= 4000 ? ms : Math.min(ms, 5)), clearTimeout, requestAnimationFrame: () => 1, cancelAnimationFrame() {},
+  setTimeout: (f, ms) => { const t = setTimeout(f, ms >= 4000 ? ms : Math.min(ms, 5)); if (ms >= 4000) t.unref(); return t; }, clearTimeout, requestAnimationFrame: () => 1, cancelAnimationFrame() {},
   ResizeObserver: class { observe() {} disconnect() {} } };
 Object.assign(win, { customCards: [], innerWidth: 1200, innerHeight: 800, scrollY: 0 }); ctx.globalThis = ctx;
 vm.createContext(ctx);
@@ -1444,16 +1445,50 @@ ok(w._built && !w._building, "next good config builds after a failure");
   r = await run("down", "local"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "null/-:not_ready", "its engine not running (not_ready): said as that, and its mixed feed is not used in its place"); r.stop();
   r = await run("new", "auto"); ok(r.conn.asked.join() === "tracker" && r.states.join() === "tracker/auto", "source auto: its ordinary mode, no word added"); r.stop();
   r = await run("new", "protect"); ok(r.conn.asked.join() === "protect" && r.states.join() === "protect/-", "source protect: not asked at all"); r.stop();
-  // auto preferring the local mode (a switch, off by default)
-  const runL = async (kind) => { const conn = mkConn(kind); const states = []; const got = []; const stop = ctx.subscribeLive({ connection: conn }, "camera.x", "auto", (m) => got.push(m), (st) => states.push(`${st.using}/${st.mode || "-"}${st.code ? ":" + st.code : ""}`), { autoLocal: true }); await tick(); await tick(); return { conn, states, got, stop }; };
-  r = await runL("new"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "tracker/local", "auto, told to prefer it: Protect Tracker's local mode");
-  r.conn.open.get(TR)({ status: "disconnected", mode: "local" }); await tick(); await tick();
-  ok(r.conn.asked.join() === "tracker:local,tracker" && r.states.join() === "tracker/local,tracker/auto" && r.got.length === 0, "its engine's connection goes: over to its ordinary mode by itself (auto is never left with nothing)"); r.stop();
-  r = await runL("old"); ok(r.conn.asked.join() === "tracker:local,tracker" && r.states.join() === "tracker/auto", "a Protect Tracker without the local mode: its ordinary mode"); r.stop();
-  r = await runL("down"); ok(r.conn.asked.join() === "tracker:local,tracker,protect" && r.states.join() === "protect/-", "Protect Tracker answering neither way (not ready): its ordinary mode is tried, then Protect's own is used"); r.stop();
-  r = await runL(null); ok(r.conn.asked.join() === "tracker:local,protect" && r.states.join() === "protect/-", "no Protect Tracker: Protect's own, as before"); r.stop();
-  r = await run("new", "auto"); ok(r.conn.asked.join() === "tracker", "(and without the switch, auto is the ordinary mode, as it has been)"); r.stop();
-  ok(Trk.autoLocal === false, "the tracking card's switch for it is off");
+  // --- auto, local first (what the tracking card's auto means)
+  {
+    // a connection with Protect Tracker's local mode, its ordinary (mixed) mode and Protect's own, each there or not
+    const mkC = (have) => { const c = { have: { ...have }, open: {}, asked: [], stopped: [],
+      subscribeMessage(cb, m) { const k = m.type === TR ? (m.mode === "local" ? "local" : "mixed") : "protect"; c.asked.push(k);
+        if (!c.have[k]) return Promise.reject({ code: k === "protect" ? "unknown_command" : c.have.tracker === false ? "unknown_command" : k === "local" ? (c.have.localErr || "not_ready") : "not_ready" });
+        c.open[k] = cb; return Promise.resolve(() => { c.stopped.push(k); delete c.open[k]; }); } }; return c; };
+    const real = Date.now; let now = Math.floor(real() / 1000) * 1000; Date.now = () => now; // (a clock of the test's own, in whole half seconds)
+    const before = new Set(timers);
+    const stamps = [];
+    const go = async (have) => { const conn = mkC(have); const states = []; const got = []; const stop = ctx.subscribeLive({ connection: conn }, "camera.x", "auto", (m) => got.push(m), (st) => { states.push(`${st.using}/${st.mode || "-"}${st.code ? ":" + st.code : ""}`); stamps.push(now); }, { autoLocal: true }); await tick(); await tick();
+      const tk = [...timers].filter((t) => !before.has(t)).pop(); before.add(tk); return { conn, states, got, stop, tickOnce: async () => { tk.f(); await tick(); await tick(); } }; };
+    const beat = (r, extra = {}) => r.conn.open.local({ clockWall: now, clockStream: now - 5, clockStreamRate: 1000, mode: "local", source: "local", snapshot: true, tracks: [], ...extra });
+    const pass = async (r, ms, beats = true) => { for (let end = now + ms; now < end; ) { now += 500; if (beats && r.conn.open.local) beat(r); if (now % 1000 < 500) await r.tickOnce(); } };
+    // 1. all there: the local mode, and only that
+    let r = await go({ local: true, mixed: true, protect: true });
+    ok(r.conn.asked.join() === "local" && r.states.join() === "tracker/local", "auto, local first: Protect Tracker's local mode is listened to, and nothing else is opened");
+    await pass(r, 5000); ok(r.conn.asked.join() === "local" && r.states.join() === "tracker/local" && r.got.length >= 9, "while it tells (a heartbeat a second): it stays");
+    // 2. it goes silent with no word of warning
+    await pass(r, 3000, false); ok(r.states.join() === "tracker/local", "silent for 3 s: not yet given up on");
+    await pass(r, 1500, false);
+    ok(r.states.join() === "tracker/local,tracker/auto" && r.conn.asked.join() === "local,mixed" && !!r.conn.open.local, "silent for over 3.5 s: over to its ordinary mode by itself; the local subscription is kept, to hear when it is back");
+    r.conn.open.mixed({ clockWall: now, tracks: [] }); ok(r.got[r.got.length - 1].snapshot === undefined, "and the ordinary mode's messages are what the card gets now");
+    // 3. the heartbeat is back: not at once, only when it has been steady
+    const n0 = r.got.length; await pass(r, 2000); ok(r.states.join() === "tracker/local,tracker/auto" && r.got.length === n0, "the heartbeat back for 2 s: still on the ordinary mode (and the local words are not passed on meanwhile)");
+    await pass(r, 2000); ok(r.states.join() === "tracker/local,tracker/auto,tracker/local" && r.conn.stopped.join() === "mixed", "steady for over 3 s: back to the local mode, and the ordinary one is let go");
+    // 4. a feed that comes and goes every couple of seconds doesn't have it hopping
+    const s0 = r.states.length; for (let k = 0; k < 6; k++) { await pass(r, 5000, false); await pass(r, 2000, true); }
+    ok(r.states.length - s0 === 1 && r.states[r.states.length - 1] === "tracker/auto", `off for 5 s, on for 2, six times over: one change to the ordinary mode and it stays there (${r.states.length - s0} change, not twelve)`);
+    await pass(r, 4000); ok(r.states[r.states.length - 1] === "tracker/local", "then steady again: back");
+    // 5. it says its engine's connection has gone: at once
+    r.conn.open.local({ status: "disconnected", mode: "local" }); await tick(); await tick();
+    ok(r.states[r.states.length - 1] === "tracker/auto" && !r.got.some((m) => m.status === "disconnected"), "it says its engine's connection is gone: over to the ordinary mode at once (the card isn't told 'disconnected': it has a feed)");
+    r.conn.open.local({ status: "connected", mode: "local", service: true }); await pass(r, 4000); ok(r.states[r.states.length - 1] === "tracker/local", "connected again and telling steadily: back");
+    r.stop(); ok(r.conn.stopped.includes("local") && Object.keys(r.conn.open).length === 0, "stopped: everything let go");
+    // 6. the three ways down
+    r = await go({ local: false, mixed: true, protect: true }); ok(r.conn.asked.join() === "local,mixed" && r.states.join() === "tracker/auto", "no local mode (an older Protect Tracker, or its engine not running): its ordinary mode"); r.stop();
+    r = await go({ local: false, mixed: false, protect: true }); ok(r.conn.asked.join() === "local,mixed,protect" && r.states.join() === "protect/-", "Protect Tracker answering neither way: Protect's own"); r.stop();
+    r = await go({ tracker: false, protect: true }); ok(r.conn.asked.join() === "local,mixed,protect" && r.states.join() === "protect/-", "no Protect Tracker at all: Protect's own, as it always was"); r.stop();
+    r = await go({ tracker: false }); ok(r.states.join() === "null/-:unknown_command", "nothing there at all: said"); r.stop();
+    Date.now = real;
+  }
+  r = await run("new", "auto"); ok(r.conn.asked.join() === "tracker", "(without the switch, auto is the ordinary mode: the wall's live view)"); r.stop();
+  ok(Trk.autoLocal === true, "the tracking card's auto is local first");
 
 
   // --- the clocks: positions go by the stream clock, so a corrected wall clock moves nothing
@@ -1516,6 +1551,17 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(/no local mode yet/.test(note(c)), "and still says so after that tracker's 'connected'");
   c.disconnectedCallback();
   c = await mkc({ source: "local" }, "down"); ok(/engine isn't running/.test(note(c)) && !c.conn.open.has(TR), "its engine not running: said so"); c.disconnectedCallback();
+  // the tracking card on auto (local first): a switch of feed in mid-follow doesn't sound again
+  c = await mkc({ sound: "ping" }, "new"); let chimes = 0; const realChime = c._chime.bind(c); c._chime = () => { chimes++; return realChime(); };
+  ok(c.conn.asked.join() === "tracker:local" && c._subs.values().next().value.using === "tracker", "tracking card on auto: asks for the local mode first");
+  see(c, { id: "L1", coord: [400, 300, 60, 160], objectType: "person", local: true, confirmed: false, moving: true, stationary: false });
+  ok(!!c._active && chimes === 1, "someone the engine sees: woken at once, one sound");
+  const localCb = c.conn.open.get(TR); localCb({ status: "disconnected", mode: "local" }); await tick(); await tick();
+  ok(c.conn.asked.join() === "tracker:local,tracker" && c.conn.open.get(TR) !== localCb && note(c) === "", "the engine's connection goes while following: the card is on the mixed feed, and says nothing alarming");
+  see(c, { id: "P77", coord: [410, 300, 60, 160], objectType: "person", stationary: false }); see(c, { id: "P77", coord: [414, 300, 60, 160], objectType: "person", stationary: false });
+  ok(!!c._active && chimes === 1, "the same person now reported under Protect's id by the other feed: still following, and no second sound");
+  c.disconnectedCallback();
+
   c = await mkc({ source: "local" }, "new"); c.conn.open.get(TR)({ status: "connected", mode: "local", service: true }); ok(note(c) === "", "local mode connected: nothing to say");
   c.conn.open.get(TR)({ status: "disconnected", mode: "local" }); ok(/engine is not connected/.test(note(c)), "the engine's connection goes: said");
   c.conn.open.get(TR)({ status: "connected", mode: "local", service: true }); ok(note(c) === "", "and back: cleared");

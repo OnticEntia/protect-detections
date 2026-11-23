@@ -82,16 +82,154 @@ const LIVE_TYPES = { tracker: "protect_tracker/live/subscribe", protect: "protec
 // only what its model made (the state says so: `mode: "auto"`).
 const LIVE_RETRY_MS = 120000; // auto, without Protect Tracker: looked for again this often
 
+const LIVE_SILENT_MS = 3500; // the local mode tells every second: this long without a word, and it isn't serving the camera
+const LIVE_BACK_MS = 3000; // ... and it must have been telling steadily this long before it is gone back to
+
+/**
+ * "auto", local first: Protect Tracker's local mode (it tells of a thing as
+ * soon as its own model sees it, without waiting for Protect) while it is
+ * there and telling; else its ordinary mode; else, with no Protect Tracker,
+ * Protect's own positions.
+ *
+ * The local mode tells about once a second even with nothing in view. When
+ * it has said nothing for 3.5 s, or says its engine's connection has gone,
+ * the next best is listened to in its place; the local subscription is kept,
+ * and gone back to once it has been telling steadily for 3 s (so a feed
+ * that comes and goes doesn't have the card hopping). A local mode that
+ * can't be had at all (an older Protect Tracker, its engine not running) is
+ * asked for again every two minutes. Same callbacks as subscribeLive.
+ */
+function subscribeLocalFirst(hass, entity, onMessage, onState) {
+  const conn = hass.connection;
+  let stopped = false;
+  let loc = null; // the local mode's subscription (kept while it can be had)
+  let other = null; // the one stood in for it: Protect Tracker's ordinary mode, or Protect's own
+  let current = null;
+  let heard = 0; // when the local mode last said anything
+  let since = 0; // since when it has been telling without a break
+  let down = false; // it has said its engine's connection is gone
+  let opening = false;
+  let asking = false;
+  let retry = null;
+  const drop = (sub) => {
+    if (sub && sub.unsub) {
+      try {
+        Promise.resolve(sub.unsub()).catch(() => {});
+      } catch (e) {}
+    }
+  };
+  const listen = (which, mode, hear) =>
+    Promise.resolve(conn.subscribeMessage(hear, { type: LIVE_TYPES[which], entity, ...(mode === "local" ? { mode } : {}) })).then((unsub) => ({ which, mode: which === "tracker" ? mode : null, unsub }));
+  const show = (sub) => {
+    if (!sub || current === sub) return;
+    current = sub;
+    onState({ using: sub.which, mode: sub.mode });
+  };
+  const telling = () => !!loc && !down && Date.now() - heard <= LIVE_SILENT_MS;
+  // the stand-in: Protect Tracker's ordinary mode; without a Protect Tracker, Protect's own
+  const openOther = () => {
+    if (other || opening || stopped) return;
+    opening = true;
+    const take = (sub) => {
+      opening = false;
+      if (stopped || telling()) return drop(sub); // (no longer wanted)
+      other = sub;
+      show(other);
+    };
+    const hear = (msg) => !stopped && other && current === other && onMessage(msg);
+    listen("tracker", "auto", hear).then(take, () =>
+      listen("protect", null, hear).then(take, (err) => {
+        opening = false;
+        if (!stopped && !current) onState({ using: null, error: err, code: err && err.code });
+      })
+    );
+  };
+  // which one is listened to, looked at again: on every word from the local mode, and once a second
+  const check = () => {
+    if (stopped) return;
+    const now = Date.now();
+    if (loc && current === loc) {
+      if (!telling()) openOther();
+    } else if (loc && !down && now - heard <= 1500 && heard - since >= LIVE_BACK_MS) {
+      // (it is telling now, and has been without a break for long enough)
+      show(loc);
+      drop(other);
+      other = null;
+    } else openOther();
+  };
+  const hearLocal = (sub) => (msg) => {
+    if (stopped || loc !== sub) return;
+    const now = Date.now();
+    if (msg && msg.status) {
+      if (msg.status === "disconnected") down = true;
+      else if (msg.status === "connected") {
+        if (down || now - heard > LIVE_SILENT_MS) since = now;
+        down = false;
+        heard = now;
+      }
+    } else {
+      if (now - heard > LIVE_SILENT_MS) since = now; // (telling again, after a silence)
+      heard = now;
+    }
+    if (current === loc && !(msg && msg.status === "disconnected")) onMessage(msg);
+    check();
+  };
+  const openLocal = () => {
+    if (loc || asking || stopped) return;
+    asking = true;
+    const sub = { which: "tracker", mode: "local", unsub: null };
+    Promise.resolve(conn.subscribeMessage((msg) => hearLocal(sub)(msg), { type: LIVE_TYPES.tracker, entity, mode: "local" })).then(
+      (unsub) => {
+        asking = false;
+        sub.unsub = unsub;
+        if (stopped) return drop(sub);
+        loc = sub;
+        down = false;
+        heard = Date.now();
+        // (at the start it is taken at once; found again later, it has to tell steadily first)
+        since = current ? heard : heard - LIVE_BACK_MS;
+        if (!current) show(loc);
+      },
+      (err) => {
+        asking = false;
+        if (stopped) return;
+        openOther();
+        // (asked for again now and then: its local mode may come, or Protect Tracker be installed)
+        clearTimeout(retry);
+        retry = setTimeout(openLocal, LIVE_RETRY_MS);
+      }
+    );
+  };
+  const tick = setInterval(check, 1000);
+  // the connection came back (Home Assistant restarted, perhaps with other integrations): from the start
+  const ready = () => {
+    if (stopped) return;
+    drop(loc);
+    drop(other);
+    loc = other = current = null;
+    openLocal();
+  };
+  if (conn.addEventListener) conn.addEventListener("ready", ready);
+  openLocal();
+  return () => {
+    stopped = true;
+    clearInterval(tick);
+    clearTimeout(retry);
+    if (conn.removeEventListener) conn.removeEventListener("ready", ready);
+    drop(loc);
+    drop(other);
+    loc = other = current = null;
+  };
+}
+
 /**
  * Listens to a camera's positions from the source asked for.
  *   onMessage(msg)   every message (positions, or a status)
  *   onState(state)   {using: "tracker" | "protect" | null, mode, error, code}
  *                    whenever what is listened to changes or fails; `mode`
  *                    is Protect Tracker's: "local" or "auto"
- * `autoLocal`: with "auto", ask Protect Tracker for its local mode first (it
- * tells of a thing as soon as its own model sees it, without waiting for
- * Protect), and use its ordinary mode only while the local one isn't there
- * (an older Protect Tracker, its engine not running or not connected).
+ * `autoLocal`: with "auto", Protect Tracker's local mode first (see
+ * subscribeLocalFirst).
  * Returns a function that stops it. With "auto", Protect Tracker is tried
  * first and Protect's own is used while it isn't there; it is looked for
  * again now and then, and when the connection to Home Assistant comes back
@@ -99,6 +237,7 @@ const LIVE_RETRY_MS = 120000; // auto, without Protect Tracker: looked for again
  */
 export function subscribeLive(hass, entity, source, onMessage, onState = () => {}, { autoLocal = false } = {}) {
   const want = LIVE_SOURCES.includes(source) ? source : "auto";
+  if (want === "auto" && autoLocal) return subscribeLocalFirst(hass, entity, onMessage, onState);
   const conn = hass.connection;
   let stopped = false;
   let current = null; // {which, unsub}
@@ -115,45 +254,21 @@ export function subscribeLive(hass, entity, source, onMessage, onState = () => {
   const listen = (which, mode) => {
     const sub = { which, mode: which === "tracker" ? mode || "auto" : null, unsub: null };
     const ask = { type: LIVE_TYPES[which], entity, ...(sub.mode === "local" ? { mode: "local" } : {}) };
-    const hear = (msg) => {
-      if (stopped || current !== sub) return;
-      // (auto on the local mode, and its engine's connection goes: the ordinary mode meanwhile)
-      if (want === "auto" && sub.mode === "local" && msg && msg.status === "disconnected") return void ordinary();
-      onMessage(msg);
-    };
-    return Promise.resolve(conn.subscribeMessage(hear, ask)).then((unsub) => {
+    return Promise.resolve(conn.subscribeMessage((msg) => !stopped && current === sub && onMessage(msg), ask)).then((unsub) => {
       sub.unsub = unsub;
       return sub;
     });
   };
-  // auto, off the local mode for now: the ordinary one, and the local one is looked for again
-  const ordinary = () => {
-    again();
-    listen("tracker").then(
-      (sub) => use(sub),
-      () => {}
-    );
-  };
-  // Protect Tracker, in the mode wanted
-  const tracker = () => {
-    if (want === "local") {
-      return listen("tracker", "local").catch((err) => {
-        // only one from before the local mode, which refuses the extra word, is asked the old way;
-        // anything else (not installed, its engine not running, not a camera of its) is what it is
-        if (stopped || !err || err.code !== "invalid_format") throw err;
-        return listen("tracker");
-      });
-    }
-    if (want === "auto" && autoLocal) {
-      return listen("tracker", "local").catch((err) => {
-        if (stopped || !err || err.code === "unknown_command") throw err; // (not installed: Protect's own)
-        again(); // (no local mode yet, or its engine not running: looked for again)
-        if (current && current.which === "tracker") throw Object.assign(new Error("as it is"), { keep: true }); // its ordinary mode is running: it stays
-        return listen("tracker");
-      });
-    }
-    return listen("tracker");
-  };
+  // Protect Tracker, in the mode wanted: local where it has it
+  const tracker = () =>
+    want !== "local"
+      ? listen("tracker")
+      : listen("tracker", "local").catch((err) => {
+          // only one from before the local mode, which refuses the extra word, is asked the old way;
+          // anything else (not installed, its engine not running, not a camera of its) is what it is
+          if (stopped || !err || err.code !== "invalid_format") throw err;
+          return listen("tracker");
+        });
   const use = (sub) => {
     if (stopped) return drop(sub);
     const old = current;
@@ -173,7 +288,7 @@ export function subscribeLive(hass, entity, source, onMessage, onState = () => {
       .then(
         (sub) => use(sub),
         (err) => {
-          if (stopped || (err && err.keep)) return null;
+          if (stopped) return null;
           if (want !== "auto") {
             // asked for by name and not there: said, and looked for again
             if (!current) onState({ using: null, error: err, code: err && err.code });
