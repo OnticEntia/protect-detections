@@ -139,7 +139,7 @@
 // card of its own: whichever file comes first defines it). All of them are
 // served from one folder whose address carries the integration's version,
 // so a new version is a new address for every file at once.
-import { findProtectCameras } from "./protect-cameras.js";
+import { findProtectCameras, cameraStatus, camerasStatus } from "./protect-cameras.js";
 import { LiveTracks, LIVE_COLORS, subscribeLive } from "./protect-live.js";
 import "./protect-tracking-card.js";
 
@@ -455,7 +455,9 @@ class CameraWallCard extends HTMLElement {
     const cfg = { ...given };
     const explicit = Array.isArray(given.cameras) && given.cameras.length > 0;
     cfg.auto_cameras = !explicit;
-    cfg.cameras = explicit ? given.cameras : hass ? findProtectCameras(hass, given) : [];
+    // (found: the cameras Protect has; one that has been removed from it is left out. Whether one is
+    // offline is not part of the list: the wall isn't built anew for that, its tile just says so)
+    cfg.cameras = explicit ? given.cameras : hass ? findProtectCameras(hass, given).map(({ status, ...cam }) => cam) : [];
     if (given.alarm === undefined) cfg.alarm = hass ? CameraWallCard._findAlarm(hass) : null;
     else if (!given.alarm) cfg.alarm = null;
     if (given.history === undefined || given.history === "auto" || given.history === true) {
@@ -463,6 +465,8 @@ class CameraWallCard extends HTMLElement {
       const able =
         hass && hass.config && (hass.config.components || []).includes("protect_detections") && !!customElements.get("protect-detection-card");
       cfg.history = able && cfg.cameras.length ? cfg.cameras.map(({ entity, tap_entity, name }) => ({ entity, tap_entity, name })) : null;
+      // every camera found is on the wall: the detections of one since removed from Protect are still its to show
+      cfg.history_removed = !explicit && given.exclude == null;
     } else if (!Array.isArray(given.history) || !given.history.length) cfg.history = null;
     const urls = this._urls || {};
     if (given.local_url === undefined) cfg.local_url = urls.internal || null;
@@ -479,9 +483,11 @@ class CameraWallCard extends HTMLElement {
     const hass = this._hass;
     const seen = this._seen || {};
     const comps = hass && hass.config && hass.config.components;
-    const same = hass && seen.entities === hass.entities && seen.devices === hass.devices && seen.comps === comps && seen.card === !!customElements.get("protect-detection-card");
+    // (and whether a camera has been let go of by the integration: that shows in its state, not in the lists)
+    const gone = hass ? this._goneSig(hass) : "";
+    const same = hass && seen.entities === hass.entities && seen.devices === hass.devices && seen.comps === comps && seen.gone === gone && seen.card === !!customElements.get("protect-detection-card");
     if (!force && same && this._found) return;
-    this._seen = hass ? { entities: hass.entities, devices: hass.devices, comps, card: !!customElements.get("protect-detection-card") } : {};
+    this._seen = hass ? { entities: hass.entities, devices: hass.devices, comps, gone, card: !!customElements.get("protect-detection-card") } : {};
     const g = this._given;
     if (hass && this._urls === undefined && (g.local_url === undefined || g.remote_url === undefined)) {
       // Home Assistant's own addresses, asked once (the answer comes later)
@@ -513,6 +519,8 @@ class CameraWallCard extends HTMLElement {
     this._foundSig = sig;
     this._config = cfg;
     this._built = false;
+    // (which cameras have live boxes and tracking is asked again: one may have been added or removed)
+    if (camsChanged && this._ltCams) this._ltCams = undefined;
     this._failedConfig = null;
     // an open camera dialog points at the old list
     if (camsChanged && this._liveIndex != null && this._closeLive) this._closeLive();
@@ -531,6 +539,7 @@ class CameraWallCard extends HTMLElement {
     const camHass = this._cameraHass(hass);
     for (const card of this._camCards) if (card) card.hass = camHass;
     for (const x of this._xTiles || []) x.card.hass = hass;
+    this._markCams();
     this._updateLive();
   }
 
@@ -721,6 +730,11 @@ class CameraWallCard extends HTMLElement {
         .tile.dragging { z-index: 5; opacity: .85; }
         .tile.dragging .arr { cursor: grabbing; }
         .tile.drop .arr { background: color-mix(in srgb, var(--primary-color) 45%, transparent); border-style: solid; }
+        /* a tile whose camera is offline, or has gone from Protect, says so */
+        .tile[data-cam] { position: relative; }
+        .tile[data-cam]::after { content: attr(data-note); position: absolute; left: 8px; top: 8px; z-index: 3; padding: 3px 9px; border-radius: 999px;
+          font-size: 12px; font-weight: 600; line-height: 16px; background: rgba(0,0,0,.72); color: #fff; pointer-events: none; }
+        .tile[data-cam="removed"]::after { background: color-mix(in srgb, var(--error-color, #db4437) 85%, #000); }
         .arr .mv { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 8px; }
         .arr .mv button { width: 44px; height: 44px; padding: 0; cursor: pointer; border-radius: 50%; border: 1px solid rgba(255,255,255,.5);
           background: rgba(0,0,0,.6); color: #fff; display: grid; place-items: center; --mdc-icon-size: 22px; }
@@ -870,6 +884,7 @@ class CameraWallCard extends HTMLElement {
         type: "custom:protect-detection-card",
         embedded: true,
         cameras: cfg.history,
+        removed: !!cfg.history_removed,
         aspect_ratio: cfg.aspect_ratio,
       };
       if (hist && hist.localName === "protect-detection-card") hist.setConfig(histCfg);
@@ -956,9 +971,69 @@ class CameraWallCard extends HTMLElement {
     this._arrLoad();
     this._syncPause(); // rebuilt with a dialog open: the new tiles rest too
     this._markDetecting();
+    this._markCams();
     this._startZones(); // (or stops them, if the new config says so)
     this._markZones();
     this._fitZones();
+  }
+
+  // The unifiprotect camera entities that the integration has let go of
+  // (removed from Protect; Home Assistant keeps them as "restored"), as one
+  // word to compare. Looked at on every state change, so it is kept cheap:
+  // only the camera entities known from the last look at the registry.
+  _goneSig(hass) {
+    if (!this._camIds || this._camIdsFor !== hass.entities) {
+      this._camIdsFor = hass.entities;
+      this._camIds = Object.keys(hass.entities || {}).filter((id) => id.startsWith("camera.") && hass.entities[id] && hass.entities[id].platform === "unifiprotect");
+    }
+    let sig = "";
+    for (const id of this._camIds) if (cameraStatus(hass, id) === "removed") sig += `${id},`;
+    return sig;
+  }
+
+  // A tile whose camera is offline, or no longer in Protect, says so. (A
+  // camera named in the config stays on the wall when it has gone: its tile
+  // says why it is blank. One that was found is taken off the wall.)
+  _markCams() {
+    if (!this._tiles || !this._builtCfg || !this._hass) return;
+    this._builtCfg.cameras.forEach((cam, i) => {
+      const tile = this._tiles[i];
+      if (!tile) return;
+      const status = camerasStatus(this._hass, [cam.entity, cam.tap_entity]);
+      const note = status === "removed" ? "No longer in UniFi Protect" : status === "offline" ? "Offline" : "";
+      if ((tile.dataset.cam || "") === (status === "ok" ? "" : status)) return;
+      if (note) {
+        tile.dataset.cam = status;
+        tile.dataset.note = note;
+      } else {
+        delete tile.dataset.cam;
+        delete tile.dataset.note;
+      }
+    });
+  }
+
+  // What is kept of the arrangement for cameras that are no longer on the
+  // wall at all (removed from Protect, or taken out of the config): their
+  // places, sizes and tracking tiles' options. Kept until the user says to
+  // forget them (the wall's menu), in case the camera comes back.
+  _staleKeys() {
+    const a = this._arr;
+    if (!a || !this._builtCfg) return [];
+    const have = new Set(this._builtCfg.cameras.map((cam) => this._camKey(cam)));
+    const base = (k) => String(k).replace(/^track:/, "");
+    const all = [...(a.tiles || []).map((t) => t.id), ...(a.list || []), ...(a.hidden || []), ...Object.keys(a.opts || {})];
+    return [...new Set(all.filter((k) => k && !have.has(base(k))))];
+  }
+
+  _forgetStale() {
+    const stale = new Set(this._staleKeys());
+    if (!stale.size) return;
+    this._arrChange((a) => {
+      a.tiles = (a.tiles || []).filter((t) => !stale.has(t.id));
+      if (a.list) a.list = a.list.filter((k) => !stale.has(k));
+      if (a.hidden) a.hidden = a.hidden.filter((k) => !stale.has(k));
+      if (a.opts) for (const k of Object.keys(a.opts)) if (stale.has(k)) delete a.opts[k];
+    });
   }
 
   // Outline the tiles of cameras that have a detection in progress (reported
@@ -2846,7 +2921,10 @@ class CameraWallCard extends HTMLElement {
     const anyOff = els.some((e) => !e.shown);
     const cams = this._config.cameras;
     const admin = this._mayEdit();
+    const stale = this._staleKeys();
     const layout = (kit) => [
+      // (what is kept for cameras no longer on the wall: forgotten only when asked)
+      ...(stale.length ? [kit.item(`Forget ${new Set(stale.map((k) => String(k).replace(/^track:/, ""))).size === 1 ? "a removed camera's place" : "removed cameras' places"}`, () => this._forgetStale())] : []),
       ...(admin ? [kit.item("Edit the wall…", () => this._editWall())] : []),
       kit.item("Arrange…", () => this._arrEnter()),
       // (everything back: places, sizes, what was taken off, the tiles' own options)
@@ -3000,6 +3078,7 @@ class CameraWallCard extends HTMLElement {
           this._ltMark(lt);
           if (st.using || src === "local") return; // (local, not there: said on the chip; it is looked for again)
           if (st.code === "unknown_command") this._ltNone = true;
+          if (st.code === "camera_removed") this._ltCams = undefined; // (asked again: it is no longer among them)
           this._ltStop();
           this._ltSync(); // (hides the buttons if it is gone)
         }
@@ -3035,6 +3114,12 @@ class CameraWallCard extends HTMLElement {
   }
 
   _ltMessage(lt, msg) {
+    if (msg && msg.status === "removed") {
+      // the camera has gone from Protect while its boxes were on: they end here (the wall is built anew when Home Assistant's lists follow)
+      this._ltCams = undefined;
+      this._ltStop();
+      return this._ltSync();
+    }
     if (msg && msg.status) {
       // (Protect Tracker's local mode says when its engine's connection goes and comes back)
       if (msg.mode) lt.mode = msg.mode;

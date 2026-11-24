@@ -247,7 +247,7 @@ class SightingLog:
                 gap["error"] = str(error)[:200]  # the newest reason
         self.dirty = True
 
-    def forget(self, camera: str, now: int | None = None) -> None:
+    def forget(self, camera: str, now: int | None = None, reason: str = "not_listening") -> None:
         """A camera is no longer listened to: what was open is closed, and the
         time from now on counts as a gap."""
         now = _now() if now is None else now
@@ -255,7 +255,7 @@ class SightingLog:
             self._finish(key)
         gaps = self.gaps.setdefault(camera, [])
         if not gaps or gaps[-1].get("to") is not None:
-            gaps.append({"from": now, "to": None, "reason": "not_listening", "tries": 0})
+            gaps.append({"from": now, "to": None, "reason": reason, "tries": 0})
             del gaps[:-KEEP_GAPS]
         self.state[camera] = {"connected": False, "since": now}
         self.dirty = True
@@ -370,6 +370,7 @@ class SightingRecorder:
         self._store = Store(hass, VERSION, f"{domain}.sightings")
         self._unsubs: dict[str, Callable[[], None]] = {}
         self._pending = False
+        self.known: Callable[[str], bool] | None = None  # is this a camera Protect has now?
 
     async def load(self) -> None:
         try:
@@ -389,6 +390,13 @@ class SightingRecorder:
         self._save_later()
 
     def _feed(self, camera: str, payload: dict[str, Any]) -> None:
+        if payload.get("status") == "removed":
+            # the camera has gone from Protect: what is on record of it is kept, and nothing more is written
+            if camera in self._unsubs:
+                self._unsubs.pop(camera)()
+                self.log.forget(camera, reason="removed")
+                self._save_later()
+            return
         self.log.feed(camera, payload)
         self._save_later()
 
@@ -397,6 +405,8 @@ class SightingRecorder:
         is on; saved no more often than the rest)."""
         if not self.recording or not isinstance(camera, str) or not isinstance(payload, dict):
             return
+        if self.known is not None and not self.known(camera):
+            return  # (a camera Protect no longer has, or never had: nothing is written for it)
         self.log.feed(camera, payload, source="local")
         self._save_later()
 

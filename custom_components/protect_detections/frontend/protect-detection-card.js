@@ -403,8 +403,21 @@ class ProtectDetectionCard extends HTMLElement {
     window[f]("resize", this._onPlace);
   }
 
+  // Is this detection one of this card's cameras'? One of a camera that is
+  // no longer in Protect has no entity to go by: a card that shows every
+  // Protect camera (none named) keeps showing it, labelled as removed, for
+  // as long as Protect has it; a card with its cameras named cannot tell
+  // whose it was, and leaves it out unless told to keep them (`removed: true`:
+  // the camera wall says so when its cameras are all that were found).
   _inScope(e) {
-    return this._config.cameras.some((c) => c.entity === e.entity || c.tap_entity === e.tap_entity);
+    if (e.camera_removed || (!e.entity && !e.tap_entity)) return !!this._auto || this._config.removed === true;
+    return this._config.cameras.some((c) => (!!c.entity && c.entity === e.entity) || (!!c.tap_entity && c.tap_entity === e.tap_entity));
+  }
+
+  // A detection's camera, by name; said to be removed when it is.
+  _camName(e) {
+    if (!e.camera_removed) return e.camera;
+    return /removed/i.test(e.camera || "") ? e.camera : `${e.camera || "Camera"} (removed)`;
   }
 
   _matches(e, kind = this._opts.filter) {
@@ -812,7 +825,7 @@ class ProtectDetectionCard extends HTMLElement {
           <div class="desc"></div>
           <div class="tags"></div>
         </div>`;
-      tile.querySelector(".desc").textContent = descs.join(", ") || e.camera;
+      tile.querySelector(".desc").textContent = descs.join(", ") || this._camName(e);
       const tags = tile.querySelector(".tags");
       if (e.type === "smartDetectLoiterZone") {
         const secs = Math.round(((e.end || e.start) - e.start) / 1000);
@@ -972,7 +985,7 @@ class ProtectDetectionCard extends HTMLElement {
     eid.onclick = url ? null : copy;
     copyBtn.onclick = copy;
     r.querySelector(".ptitle small").textContent =
-      `${e.camera} · ${new Date(e.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit", second: "2-digit" })}`;
+      `${this._camName(e)} · ${new Date(e.start).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit", second: "2-digit" })}`;
     const strip = r.querySelector(".strip");
     strip.innerHTML = "";
     for (const o of (e.objects || []).slice(0, 8)) {

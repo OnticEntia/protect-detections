@@ -36,6 +36,7 @@ undocumented: a Protect update could change it.
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from collections import OrderedDict
 import logging
 import time
@@ -50,6 +51,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
+from homeassistant.helpers.event import async_track_time_interval
 
 # The connection to Protect's live updates is Protect Zones' (one connection
 # for all the Protect companions). Only its code is needed, not a set-up
@@ -61,6 +63,7 @@ try:
 except ImportError:  # Protect Zones isn't installed (or is too old to have it)
     async_get_stream = None
 
+from .cameras import CameraBook
 from .cards import CardsView, async_card_urls, load_cards, unload_cards
 from .clips import ClipStore
 from .live import LiveTracks
@@ -78,6 +81,8 @@ CONF_RECORD = "record_sightings"  # option: listen to every camera's live tracki
 KEEP_EVENTS = 60
 HISTORY_HOURS = 3
 DETECT_TYPES = ("smartDetectZone", "smartDetectLine")
+CAMERAS_SETTLE = 3.0  # seconds after word of a camera coming or going before the list is read again
+CAMERAS_CHECK = 300  # seconds between looks at the list anyway (word of a change can be missed)
 TRACK_POLL = 2.0  # seconds between box fetches while a detection is live
 THUMB_CACHE = 200
 
@@ -152,15 +157,20 @@ class DetectionHub:
         self.subscribers: set[Any] = hass.data.setdefault(SUBSCRIBERS, set())
         self._tasks: set[asyncio.Task] = set()
         self._was_connected = False
-        self.cameras: dict[str, dict[str, Any]] = {}
+        # Protect's cameras, and those it no longer has (cameras.py)
+        self.book = CameraBook()
+        self.cameras: dict[str, dict[str, Any]] = self.book.cams
+        self._cam_timer: asyncio.TimerHandle | None = None
+        self._cam_unsubs: list[Any] = []
         self.thumbs: OrderedDict[str, bytes] = OrderedDict()
         self._track_tasks: dict[str, asyncio.Task] = {}
         self._track_done: set[str] = set()
         self._unsub_stream = None
         self._stopping = False
         self.clips = ClipStore()
-        self.live = LiveTracks(hass, lambda: _protect_api(hass))
+        self.live = LiveTracks(hass, lambda: _protect_api(hass), self._in_protect)
         self.sightings = SightingRecorder(hass, self.live, DOMAIN)
+        self.sightings.known = self.book.present  # (nothing is written for a camera that has gone)
         self.history: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     @property
@@ -173,26 +183,85 @@ class DetectionHub:
 
     # ---------------------------------------------------------------- setup
 
-    def load_cameras(self) -> None:
-        """Protect camera id -> name and HA camera entities (medium / high)."""
+    def load_cameras(self) -> dict[str, list[str]]:
+        """Protect camera id -> name and HA camera entities (medium / high).
+        A camera Protect no longer has is kept, marked as removed. Returns
+        what changed (see CameraBook.update)."""
         api = self.api
         if api is None:
-            return
+            return {"added": [], "removed": [], "back": [], "changed": []}
         reg = er.async_get(self.hass)
         by_uid = {
             e.unique_id: e.entity_id
             for e in reg.entities.values()
             if e.platform == "unifiprotect" and e.domain == "camera" and not e.disabled_by
         }
+        found = []
         for cam in api.bootstrap.cameras.values():
             mac = (cam.mac or "").replace(":", "").upper()
             high = by_uid.get(f"{mac}_0")
-            self.cameras[cam.id] = {
+            found.append({
                 "id": cam.id,
                 "name": cam.name,
                 "entity": by_uid.get(f"{mac}_1") or high,
                 "tap_entity": high or by_uid.get(f"{mac}_1"),
-            }
+            })
+        return self.book.update(found)
+
+    def _in_protect(self, camera_id: str) -> bool:
+        """Does Protect still have this camera? (Asked of Protect's own list:
+        yes while that can't be told, so that nothing is given up wrongly.)"""
+        api = self.api
+        try:
+            return api is None or camera_id in api.bootstrap.cameras
+        except AttributeError:
+            return True
+
+    @callback
+    def cameras_changed_soon(self, *_: Any) -> None:
+        """Word that a camera may have come or gone: the list is read again
+        in a moment (once, however many words come together)."""
+        if self._stopping or self._cam_timer is not None:
+            return
+        self._cam_timer = self.hass.loop.call_later(CAMERAS_SETTLE, self.refresh_cameras)
+
+    @callback
+    def refresh_cameras(self, *_: Any) -> None:
+        """Read the cameras again, and act on what changed: a new camera is
+        there without a restart; a removed one is no longer listened to, its
+        open live subscriptions are told why they end, and what is shown of
+        its past detections says it has gone."""
+        self._cam_timer = None
+        if self._stopping:
+            return
+        try:
+            what = self.load_cameras()
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Couldn't read the cameras again", exc_info=True)
+            return
+        if not any(what.values()):
+            return
+        _LOGGER.info(
+            "Protect's cameras changed: %d new, %d removed, %d back, %d renamed or re-linked",
+            len(what["added"]), len(what["removed"]), len(what["back"]), len(what["changed"]),
+        )
+        for cam_id in what["removed"]:
+            self.live.drop(cam_id)
+        self._watch()
+        # the detections on show: whose they are now
+        for ev in [*self.events.values(), *self.history.values()]:
+            self._label(ev)
+        self._push_snapshot()
+
+    def _label(self, ev: dict[str, Any]) -> dict[str, Any]:
+        """A detection's camera, as it is now: its name and entities, or that it has been removed."""
+        cam = self.cameras.get(ev.get("camera_id")) or {}
+        name, removed = self.book.label(ev.get("camera_id"))
+        ev["camera"] = name
+        ev["camera_removed"] = removed
+        ev["entity"] = cam.get("entity")
+        ev["tap_entity"] = cam.get("tap_entity")
+        return ev
 
     def smart_cameras(self) -> list[str]:
         """The cameras (Protect ids) that recognise things, so have live tracking.
@@ -246,10 +315,28 @@ class DetectionHub:
         stream = async_get_stream(self.hass)
         self._was_connected = stream.connected
         self._unsub_stream = stream.subscribe(self._handle, self._disconnected, self._connected)
+        # cameras coming and going while this runs: told by Home Assistant's
+        # entity registry (a camera's entities made or taken away), by
+        # Protect's own updates (_handle), and looked for now and then anyway
+        self._cam_unsubs = [
+            self.hass.bus.async_listen(er.EVENT_ENTITY_REGISTRY_UPDATED, self._registry_changed),
+            async_track_time_interval(self.hass, self.refresh_cameras, timedelta(seconds=CAMERAS_CHECK)),
+        ]
         self._push_snapshot()  # dashboards that were open across a reload
+
+    @callback
+    def _registry_changed(self, event: Any) -> None:
+        if str(event.data.get("entity_id", "")).startswith("camera."):
+            self.cameras_changed_soon()
 
     async def stop(self) -> None:
         self._stopping = True
+        for unsub in self._cam_unsubs:
+            unsub()
+        self._cam_unsubs = []
+        if self._cam_timer is not None:
+            self._cam_timer.cancel()
+            self._cam_timer = None
         if self._unsub_stream:
             self._unsub_stream()
             self._unsub_stream = None
@@ -280,7 +367,7 @@ class DetectionHub:
 
     async def _resync(self) -> None:
         """Back after a gap: detections may have started or ended unseen."""
-        self.load_cameras()  # cameras may have been added or renamed too
+        self.refresh_cameras()  # cameras may have been added, renamed or removed too
         self._watch()
         try:
             now = int(time.time() * 1000)
@@ -325,6 +412,9 @@ class DetectionHub:
     @callback
     def _handle(self, action: dict[str, Any], data: Any) -> None:
         model = action.get("modelKey")
+        if model == "camera" and action.get("action") in ("add", "remove"):
+            self.cameras_changed_soon()  # (adopted, or taken out of Protect)
+            return
         if model == "event" and isinstance(data, dict):
             data = {**data, "id": action.get("id") or data.get("id")}
             if action.get("action") == "add" or data["id"] in self.events:
@@ -345,14 +435,10 @@ class DetectionHub:
                 return
             cam_id = raw.get("camera") or raw.get("device")
             if cam_id not in self.cameras:
-                self.load_cameras()  # a camera added since we started
-            cam = self.cameras.get(cam_id, {})
-            ev = {
+                self.refresh_cameras()  # a camera added since we started
+            ev = self._label({
                 "id": eid,
                 "camera_id": cam_id,
-                "camera": cam.get("name") or "Camera",
-                "entity": cam.get("entity"),
-                "tap_entity": cam.get("tap_entity"),
                 "type": raw.get("type"),
                 "start": raw.get("start"),
                 "end": None,
@@ -360,7 +446,7 @@ class DetectionHub:
                 "areas": [],
                 "objects": [],
                 "track": None,
-            }
+            })
             self.events[eid] = ev
             while len(self.events) > KEEP_EVENTS:
                 old_id, _ = self.events.popitem(last=False)
@@ -390,14 +476,10 @@ class DetectionHub:
     def event_from_raw(self, raw: dict[str, Any]) -> dict[str, Any]:
         """A detection record for an event that isn't in the live list."""
         cam_id = raw.get("camera") or raw.get("device")
-        cam = self.cameras.get(cam_id, {})
         meta = raw.get("metadata") or {}
-        return {
+        return self._label({
             "id": raw.get("id"),
             "camera_id": cam_id,
-            "camera": cam.get("name") or "Camera",
-            "entity": cam.get("entity"),
-            "tap_entity": cam.get("tap_entity"),
             "type": raw.get("type"),
             "start": raw.get("start"),
             "end": raw.get("end"),
@@ -405,7 +487,7 @@ class DetectionHub:
             "areas": [a.get("areaIndexes") or [] for a in meta.get("detectedAreas") or []],
             "objects": _objects_from_meta(meta),
             "track": None,
-        }
+        })
 
     async def search(
         self, kind: str | None, before: int | None, limit: int, start: int | None = None
@@ -565,7 +647,9 @@ class DetectionHub:
             send({"event": ev})
 
     def snapshot(self) -> dict[str, Any]:
-        return {"snapshot": list(self.events.values()), "connected": self.connected, "cameras": list(self.cameras.values())}
+        # (the cameras Protect has now; those it no longer has are told of only by the detections that were theirs)
+        cams = [c for c in self.cameras.values() if not c.get("removed")]
+        return {"snapshot": list(self.events.values()), "connected": self.connected, "cameras": cams}
 
     @callback
     def _push_snapshot(self) -> None:
@@ -650,6 +734,11 @@ async def ws_clip(hass: HomeAssistant, connection: websocket_api.ActiveConnectio
             await hub._fetch_track(ev["id"])
         clip = await hub.clips.get(hub.api, ev, msg["hevc"], msg["quality"])
     except Exception as err:
+        if ev.get("camera_removed"):
+            # (nothing to warn of: its recordings went with it, or will)
+            _LOGGER.debug("Clip for %s (a removed camera's) failed: %s", ev["id"], err)
+            connection.send_error(msg["id"], "camera_removed", "This camera is no longer in UniFi Protect, and its recording could not be had")
+            return
         _LOGGER.warning("Clip for %s failed: %s", ev["id"], err)
         connection.send_error(msg["id"], "clip_failed", f"Couldn't get the recording: {err}")
         return
@@ -740,11 +829,20 @@ def ws_speakers(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
 
 
 def _camera_of(hub: DetectionHub, entity: str) -> str | None:
-    """The Protect camera an HA camera entity (either stream) belongs to."""
-    for cam_id, cam in hub.cameras.items():
-        if entity in (cam.get("entity"), cam.get("tap_entity")):
-            return cam_id
-    return None
+    """The Protect camera an HA camera entity (either stream) belongs to
+    (one Protect still has)."""
+    cam_id, removed = hub.book.of_entity(entity)
+    return None if removed else cam_id
+
+
+def _no_camera(hub: DetectionHub, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Answer for an entity that is no camera to listen to: one of a camera
+    Protect no longer has (said as that), or not one of Protect's at all."""
+    _, removed = hub.book.of_entity(msg["entity"])
+    if removed:
+        connection.send_error(msg["id"], "camera_removed", "This camera is no longer in UniFi Protect")
+    else:
+        connection.send_error(msg["id"], "not_found", "Not a UniFi Protect camera")
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/live/cameras"})
@@ -753,7 +851,10 @@ def ws_live_cameras(hass: HomeAssistant, connection: websocket_api.ActiveConnect
     """The camera entities whose cameras recognise things (so have live boxes)."""
     hub: DetectionHub | None = hass.data.get(DOMAIN)
     out: dict[str, str] = {}
-    for cam_id in hub.smart_cameras() if hub else []:
+    smart = hub.smart_cameras() if hub else []
+    if hub and any(cam_id not in hub.cameras for cam_id in smart):
+        hub.refresh_cameras()  # a camera adopted since we last looked
+    for cam_id in smart:
         known = hub.cameras.get(cam_id) or {}
         for key in ("entity", "tap_entity"):
             if known.get(key):
@@ -772,10 +873,10 @@ def ws_live_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConne
         return
     cam_id = _camera_of(hub, msg["entity"])
     if cam_id is None:
-        hub.load_cameras()  # a camera added since we started
+        hub.refresh_cameras()  # a camera added (or removed) since we last looked
         cam_id = _camera_of(hub, msg["entity"])
     if cam_id is None:
-        connection.send_error(msg["id"], "not_found", "Not a UniFi Protect camera")
+        _no_camera(hub, connection, msg)
         return
 
     @callback
@@ -810,7 +911,8 @@ def ws_live_seen(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         return
     only = None
     if msg.get("entity"):
-        cam_id = _camera_of(hub, msg["entity"])
+        # (a removed camera's sightings can still be asked for by its last entity)
+        cam_id, _removed = hub.book.of_entity(msg["entity"])
         if cam_id is None:
             connection.send_error(msg["id"], "not_found", "Not a UniFi Protect camera")
             return
@@ -818,7 +920,7 @@ def ws_live_seen(hass: HomeAssistant, connection: websocket_api.ActiveConnection
     out = hub.sightings.log.snapshot(only, msg.get("types"), msg["limit"], msg.get("since"), source=msg.get("source"))
     for cam_id, cam in out["cameras"].items():
         known = hub.cameras.get(cam_id) or {}
-        cam["name"] = known.get("name")
+        cam["name"], cam["removed"] = hub.book.label(cam_id)  # (what is on record of a camera that has gone is kept, and says so)
         cam["entity"] = known.get("entity")
     out["recording"] = hub.sightings.recording
     connection.send_result(msg["id"], out)

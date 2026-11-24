@@ -164,7 +164,7 @@
  */
 
 // Shared with the other cards here (served from the same folder).
-import { findProtectCameras } from "./protect-cameras.js";
+import { findProtectCameras, cameraStatus, camerasStatus } from "./protect-cameras.js";
 import { LiveTracks, LIVE_COLORS, LIVE_SOURCES, subscribeLive, deepFind, pictureBox } from "./protect-live.js";
 
 const KINDS = { person: ["Person", "people"], vehicle: ["Vehicle", "vehicles"], animal: ["Animal", "animals"], package: ["Package", "packages"] };
@@ -964,6 +964,15 @@ class ProtectTrackingCard extends HTMLElement {
     const lists = !first && (this._hass.entities !== hass.entities || this._hass.devices !== hass.devices);
     this._hass = hass;
     if (first || lists) this._discover(); // (a camera added or removed is picked up)
+    else {
+      // the cameras watched, and the one named in the config: offline, back, or no longer Protect's
+      const sig = this._standing();
+      if (sig !== this._stood) {
+        this._stood = sig;
+        if (sig.includes("removed") || this._state === "removed") this._discover();
+        else this._sync();
+      }
+    }
     const a = this._active;
     if (a && a.stream) this._feed(a.stream, a.entity);
     if (this._warm) this._feed(this._warm.stream, this._warm.entity);
@@ -1109,7 +1118,9 @@ class ProtectTrackingCard extends HTMLElement {
     name.textContent = this._config.name || (cams.length === 1 ? cams[0].name : cams.length ? `${cams.length} cameras` : "Tracking");
     let text = `Watching for ${this._what()}`;
     if (this._state === "norelay") text = "Needs the Protect Detections integration (with its live tracking)";
+    else if (this._state === "removed") text = this._config.embedded ? "This camera is no longer in UniFi Protect" : "This camera is no longer in UniFi Protect. Pick another in the card's editor";
     else if (this._state === "nocams") text = this._config.camera ? "This camera doesn't recognise things" : "No camera here recognises things";
+    else if (this._offline()) text = cams.length === 1 ? "Camera offline" : "Cameras offline";
     else if (!this._cams) text = "Looking for cameras…";
     else if (this._listening === false) text = "Paused while out of sight";
     status.textContent = text;
@@ -1126,7 +1137,7 @@ class ProtectTrackingCard extends HTMLElement {
     // the scanner runs only while the card is really watching
     const frame = root.querySelector(".frame");
     frame.classList.toggle("paused", this._listening !== true);
-    frame.classList.toggle("noscan", !!this._state || !this._cams || !this._cams.length);
+    frame.classList.toggle("noscan", !!this._state || !this._cams || !this._cams.length || this._offline());
   }
 
   // When the watched kinds were last seen, as the integration recorded it:
@@ -1166,6 +1177,21 @@ class ProtectTrackingCard extends HTMLElement {
   // -------------------------------------------------------------- cameras
 
   // Which cameras to watch: [{id (Protect's), entity (light), tap_entity (best), name}].
+  // How the cameras this card is about stand ("ok", "offline", "removed": see protect-cameras.js), as one word to compare.
+  _standing() {
+    const hass = this._hass;
+    const cfg = this._config || {};
+    const cams = (this._cams || []).map((c) => camerasStatus(hass, [c.entity, c.tap_entity]));
+    return `${cfg.camera ? cameraStatus(hass, cfg.camera) : ""}|${cams.join(",")}`;
+  }
+
+  // Are all the cameras watched offline (there, but not answering)? Then
+  // nothing is listened to or played until one is back.
+  _offline() {
+    const cams = this._cams || [];
+    return cams.length > 0 && cams.every((c) => camerasStatus(this._hass, [c.entity, c.tap_entity]) !== "ok");
+  }
+
   _discover() {
     const hass = this._hass;
     if (!hass || !this._config) return;
@@ -1188,12 +1214,15 @@ class ProtectTrackingCard extends HTMLElement {
         }
       }
       const same = this._cams && JSON.stringify(this._cams) === JSON.stringify(cams);
-      this._state = cams.length ? null : "nocams";
+      // none to watch: because the one named has gone from Protect, or is one that doesn't recognise things
+      const named = cfg.camera ? cameraStatus(hass, cfg.camera) : null;
+      this._state = cams.length ? null : named === "removed" ? "removed" : "nocams";
       if (!same) {
         this._stopAll();
         this._cams = cams;
         this._serverSeen = 0;
       }
+      this._stood = this._standing();
       this._idle();
       this._askSeen(!same);
       this._sync();
@@ -1232,7 +1261,7 @@ class ProtectTrackingCard extends HTMLElement {
   _sync() {
     if (!this._root || !this._hass) return;
     const cams = this._cams || [];
-    const want = this.isConnected && this._onScreen !== false && !document.hidden && !this._paused && cams.length > 0 && !this._state;
+    const want = this.isConnected && this._onScreen !== false && !document.hidden && !this._paused && cams.length > 0 && !this._state && !this._offline();
     this._listening = cams.length ? want : undefined;
     if (!want) {
       this._stopAll();
@@ -1266,6 +1295,7 @@ class ProtectTrackingCard extends HTMLElement {
             this._note = st.code === "unknown_command" ? "Protect Tracker isn't installed (source: local)" : st.code === "not_ready" ? "Protect Tracker's engine isn't running (source: local)" : "Protect Tracker isn't answering (source: local)";
             this._srcNote = true;
           } else if (st.code === "unknown_command") this._state = "norelay";
+          else if (st.code === "camera_removed") this._gone();
           else this._note = "Couldn't start listening for this camera";
           if (!this._active) this._idle();
         },
@@ -1324,7 +1354,17 @@ class ProtectTrackingCard extends HTMLElement {
     if (quiet !== was && !this._active) this._idle();
   }
 
+  // The camera has gone from Protect (so the integration says): everything
+  // for it is stopped, and the card says so until another is picked.
+  _gone() {
+    if (!this._config.camera && (this._cams || []).length > 1) return this._discover(); // (one of several: the rest carry on)
+    this._state = "removed";
+    this._stopAll();
+    this._idle();
+  }
+
   _message(sub, msg) {
+    if (msg && msg.status === "removed") return this._gone();
     if (msg && msg.status) {
       // (Protect Tracker's local mode tells when its engine's connection goes and comes back)
       const engine = msg.mode === "local" || sub.lt.mode === "local";
@@ -1893,6 +1933,8 @@ const EDIT_LABELS = { camera: "Camera (empty: every camera that recognises thing
 const EDIT_STYLE = `
   :host { display: block; }
   .sound { margin-top: 20px; }
+  .gone { margin-top: 10px; font-size: 13px; color: var(--warning-color, #b45309); }
+  .gone[hidden] { display: none; }
   .label { font-size: 14px; color: var(--secondary-text-color); margin-bottom: 8px; }
   .picks { display: flex; flex-wrap: wrap; gap: 8px; }
   .picks button { font: inherit; font-size: 14px; padding: 7px 14px; border-radius: 999px; cursor: pointer; color: var(--primary-text-color);
@@ -1919,6 +1961,7 @@ class ProtectTrackingCardEditor extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (this._form) this._form.hass = hass;
+    this._stale();
   }
 
   connectedCallback() {
@@ -1988,7 +2031,9 @@ class ProtectTrackingCardEditor extends HTMLElement {
     vol.append(el("span", "", "Volume"), range, this._volText);
     this._note = el("div", "note");
     sound.append(el("div", "label", "Sound when it starts following (click one to hear it)"), picks, vol, this._note);
-    root.append(style, form, sound);
+    this._gone = el("div", "gone");
+    this._gone.hidden = true;
+    root.append(style, form, this._gone, sound);
     // (Home Assistant loads its form element only where one is used: ask for it)
     if (!customElements.get("ha-form") && window.loadCardHelpers) {
       Promise.resolve(window.loadCardHelpers())
@@ -2004,12 +2049,24 @@ class ProtectTrackingCardEditor extends HTMLElement {
     if (!this._form) this._make();
     this._form.hass = this._hass;
     this._form.data = this._values();
+    this._stale();
     const now = this._sound();
     for (const [value, b] of this._picks) b.classList.toggle("on", value === now);
     const vol = this._volume();
     this._range.value = String(vol);
     this._volText.textContent = `${Math.round(vol * 100)}%`;
     this._mark();
+  }
+
+  // The camera picked is no longer there (or is offline): said under the
+  // form, so that a stale choice doesn't just look like an odd entry.
+  _stale() {
+    const el = this._gone;
+    if (!el) return;
+    const cam = this._config && this._config.camera;
+    const status = cam && this._hass ? cameraStatus(this._hass, cam) : "ok";
+    el.hidden = status === "ok";
+    el.textContent = status === "removed" ? `The camera picked (${cam}) is no longer in UniFi Protect. Pick another, or clear the field to watch every camera.` : status === "offline" ? "The camera picked is offline for now. The card picks up again by itself when it is back." : "";
   }
 
   // Why nothing is heard, said beside the picker.

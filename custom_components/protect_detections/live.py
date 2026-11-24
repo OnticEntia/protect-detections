@@ -21,9 +21,13 @@ import logging
 import time
 from typing import Any
 
-from aiohttp import WSMsgType
+try:
+    from homeassistant.core import HomeAssistant, callback
+except ImportError:  # (read on its own, as the tests do: nothing here needs Home Assistant to be thought through)
+    HomeAssistant = Any  # type: ignore[assignment,misc]
 
-from homeassistant.core import HomeAssistant, callback
+    def callback(func):  # type: ignore[no-redef]
+        return func
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,9 +91,14 @@ class _Feed:
                 _LOGGER.debug("A live-track listener failed", exc_info=True)
 
     async def run(self) -> None:
-        """Stay connected while there are listeners; start over after a drop."""
+        """Stay connected while there are listeners; start over after a drop.
+        Until the camera is no longer in Protect: then the listeners are told
+        so, once, and that is the end of it (no trying again for good)."""
         backoff = 2.0
         while True:
+            if not self.live.exists(self.camera_id):
+                self.live.ended(self)
+                return
             try:
                 await self._connection()
                 backoff = 2.0  # it had been connected
@@ -105,6 +114,7 @@ class _Feed:
             backoff = min(backoff * 2, 60.0)
 
     async def _connection(self) -> None:
+        from aiohttp import WSMsgType  # noqa: PLC0415
         from uiprotect.data.websocket import WSPacket  # noqa: PLC0415
         from yarl import URL  # noqa: PLC0415
 
@@ -139,12 +149,37 @@ class _Feed:
 
 
 class LiveTracks:
-    """The cameras being listened to. `api` gives the Protect client."""
+    """The cameras being listened to. `api` gives the Protect client;
+    `exists` says whether Protect still has a camera (by its id)."""
 
-    def __init__(self, hass: HomeAssistant, api: Callable[[], Any]) -> None:
+    def __init__(self, hass: HomeAssistant, api: Callable[[], Any], exists: Callable[[str], bool] | None = None) -> None:
         self.hass = hass
         self.api = api
+        self.exists = exists or (lambda camera_id: True)
         self.feeds: dict[str, _Feed] = {}
+
+    @callback
+    def ended(self, feed: _Feed) -> None:
+        """A camera's feed is over because the camera has gone from Protect:
+        its listeners are told why, and nothing is left running for it."""
+        if self.feeds.get(feed.camera_id) is feed:
+            self.feeds.pop(feed.camera_id, None)
+        if feed.linger:
+            feed.linger.cancel()
+            feed.linger = None
+        feed.connected = False
+        feed.tell({"status": "removed"})
+
+    @callback
+    def drop(self, camera_id: str) -> None:
+        """Stop listening to a camera that has gone from Protect, now (not
+        at its feed's next attempt to connect)."""
+        feed = self.feeds.get(camera_id)
+        if feed is None:
+            return
+        if feed.task:
+            feed.task.cancel()
+        self.ended(feed)
 
     @callback
     def subscribe(self, camera_id: str, send: Send) -> Callable[[], None]:
@@ -182,7 +217,8 @@ class LiveTracks:
         if feed.task:
             feed.task.cancel()
         feed.connected = False
-        self.feeds.pop(feed.camera_id, None)
+        if self.feeds.get(feed.camera_id) is feed:  # (not a newer one for the same camera)
+            self.feeds.pop(feed.camera_id, None)
 
     async def stop(self) -> None:
         tasks = []

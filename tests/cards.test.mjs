@@ -54,7 +54,7 @@ const ctx = { window: win, document: { createElement: (t) => (defs[t] ? new defs
   ResizeObserver: class { observe() {} disconnect() {} } };
 Object.assign(win, { customCards: [], innerWidth: 1200, innerHeight: 800, scrollY: 0 }); ctx.globalThis = ctx;
 vm.createContext(ctx);
-vm.runInContext(fs.readFileSync(FRONTEND + "protect-cameras.js", "utf8").replace(/^export /m, "") + "\n;globalThis.findProtectCameras = findProtectCameras;", ctx);
+vm.runInContext(fs.readFileSync(FRONTEND + "protect-cameras.js", "utf8").replace(/^export /gm, "") + "\n;Object.assign(globalThis, { findProtectCameras, cameraStatus, camerasStatus });", ctx);
 vm.runInContext(fs.readFileSync(FRONTEND + "protect-live.js", "utf8").replace(/^export /gm, "") + "\n;Object.assign(globalThis, { LiveTracks, LIVE_COLORS, LIVE_DELAY_MS, LIVE_SOURCES, subscribeLive, deepFind, pictureBoxShared: pictureBox });", ctx);
 vm.runInContext("{" + plain(fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8")) + "}", ctx);
 for (const f of [FRONTEND + "protect-detection-card.js", FRONTEND + "camera-wall-card.js"]) vm.runInContext(plain(fs.readFileSync(f, "utf8")) + "\n;globalThis.swipeStep = typeof swipeStep === 'function' ? swipeStep : globalThis.swipeStep; globalThis.todayStr = typeof todayStr === 'function' ? todayStr : globalThis.todayStr;", ctx);
@@ -1587,6 +1587,142 @@ ok(w._built && !w._building, "next good config builds after a failure");
   w = await mkw("down"); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local · engine not running" && w._liveRoot.querySelector(".lsrc").classList.contains("warn"), "its engine not running: on the chip"); w._closeLive(); w.disconnectedCallback();
   w = await mkw("new"); w.conn.open.get(TR)({ status: "disconnected", mode: "local" }); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local · engine down", "the engine's connection going while watching: on the chip");
   w.conn.open.get(TR)({ status: "connected", mode: "local", service: true }); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local", "and back"); w._closeLive(); w.disconnectedCallback();
+  ctx.setTimeout = realTimeout; ctx.localStorage.store = {};
+}
+// --- cameras offline, removed from Protect, and newly adopted
+{
+  ctx.document.hidden = false; ctx.localStorage.store = {};
+  const realTimeout = ctx.setTimeout; ctx.setTimeout = (f, ms) => (ms >= 100000 ? { held: true } : realTimeout(f, ms));
+  const UP = { state: "recording", attributes: { channel_id: 0 } };
+  const OFFLINE = { state: "unavailable", attributes: { channel_id: 0 } };
+  const LET_GO = { state: "unavailable", attributes: { restored: true } }; // what Home Assistant keeps for an entity whose integration has let go of it
+  const E = (n) => `camera.c${n}_high_resolution_channel`;
+  const ent = (n) => ({ device_id: `d${n}`, platform: "unifiprotect" });
+  // --- telling the three apart
+  const h0 = { entities: { [E(1)]: ent(1), [E(2)]: ent(2), [E(3)]: ent(3), [E(4)]: ent(4) }, states: { [E(1)]: UP, [E(2)]: OFFLINE, [E(3)]: LET_GO }, devices: { d1: { name: "One" }, d2: { name: "Two" }, d3: { name: "Three" }, d4: { name: "Four" } } };
+  ok(ctx.cameraStatus(h0, E(1)) === "ok" && ctx.cameraStatus(h0, E(2)) === "offline" && ctx.cameraStatus(h0, E(3)) === "removed", "a camera entity: there; offline (unavailable, for now); removed (let go of by the integration)");
+  ok(ctx.cameraStatus(h0, "camera.never_was") === "removed" && ctx.cameraStatus(h0, E(4)) === "ok", "one Home Assistant doesn't know at all: removed; one it knows but has no state for yet (a page still loading): not said to be gone");
+  ok(ctx.camerasStatus(h0, [E(2), E(1)]) === "ok" && ctx.camerasStatus(h0, [E(2), E(3)]) === "offline" && ctx.camerasStatus(h0, [E(3)]) === "removed" && ctx.camerasStatus(h0, []) === "removed", "a camera with several entities is there if any of them is");
+  const found = ctx.findProtectCameras(h0);
+  ok(found.map((c) => `${c.name}:${c.status}`).join() === "Four:ok,One:ok,Two:offline", "the cameras found: a removed one is left out; an offline one is still listed, marked");
+  ok(ctx.findProtectCameras(h0, { removed: true }).some((c) => c.name === "Three" && c.status === "removed"), "(asked for by name, the removed ones are listed too)");
+
+  // --- the tracking card
+  const mkT = async (cfg, { states, live, entities, reject } = {}) => { const open = new Map(); const asked = [];
+    const reg = entities || { [E(1)]: ent(1), [E(2)]: ent(2) };
+    const mk = (st) => ({ ...hass, entities: reg, states: st, devices: { d1: { name: "One" }, d2: { name: "Two" } },
+      connection: { subscribeMessage: (cb, m) => { asked.push(m.entity); if (reject && reject[m.entity] && !m.type.startsWith("protect_tracker")) return Promise.reject({ code: reject[m.entity] }); if (m.type.startsWith("protect_tracker")) return Promise.reject({ code: "unknown_command" }); open.set(m.entity, cb); return Promise.resolve(() => open.delete(m.entity)); } },
+      callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: c.live }); if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } });
+    const c = new Trk(); c.live = live || { [E(1)]: "p1", [E(2)]: "p2" }; c.setConfig(cfg); c.isConnected = true; c.hass = mk(states || { [E(1)]: UP, [E(2)]: UP }); c.connectedCallback(); await tick(); await tick(); await tick();
+    c.open = open; c.asked = asked; c.to = async (st, reg2) => { if (reg2) { for (const k of Object.keys(reg)) delete reg[k]; } const hh = mk(st); if (reg2) hh.entities = reg2; c.hass = hh; await tick(); await tick(); await tick(); }; return c; };
+  const txt = (c) => c._root.querySelector(".idle span").textContent;
+  const nothing = (c) => c.open.size === 0 && !c._warm && !c._active && !c._snapTimer && c._root.querySelector(".video").children.length === 0;
+  // the camera it is set to has gone from Protect (its entity too)
+  let c = await mkT({ camera: E(9), warm: true, sound: "ping", split: 2 }, {});
+  ok(c._state === "removed" && /no longer in UniFi Protect\. Pick another in the card's editor/.test(txt(c)) && nothing(c), "tracking card set to a camera that is no longer there (warm, sound and split on): says so plainly, and nothing runs for it (no stream, no listening, no timer)");
+  c.disconnectedCallback();
+  // ... or its entity lingers, let go of by the integration
+  c = await mkT({ camera: E(2), warm: true }, { states: { [E(1)]: UP, [E(2)]: LET_GO }, live: { [E(1)]: "p1" } });
+  ok(c._state === "removed" && nothing(c), "the same when its entity is still in Home Assistant but no longer the integration's");
+  c.disconnectedCallback();
+  c = await mkT({ camera: E(1), embedded: true }, { states: { [E(1)]: LET_GO }, live: {} });
+  ok(txt(c) === "This camera is no longer in UniFi Protect", "(on the wall, where there is no editor to send anyone to, it just says so)"); c.disconnectedCallback();
+  // a camera that never recognised things is another matter, as before
+  c = await mkT({ camera: E(2) }, { live: { [E(1)]: "p1" } }); ok(c._state === "nocams" && /doesn't recognise things/.test(txt(c)), "a camera that is there but doesn't recognise things is still said to be that, not 'removed'"); c.disconnectedCallback();
+  // offline: quiet, nothing running, and back by itself
+  c = await mkT({ camera: E(1), warm: true });
+  ok(c.open.has(E(1)) && !!c._warm && txt(c) === "Watching for people", "a camera that is there: listened to, its stream kept warm");
+  await c.to({ [E(1)]: OFFLINE, [E(2)]: UP });
+  ok(txt(c) === "Camera offline" && nothing(c) && !c._state, "it goes offline: the card says 'Camera offline' and stops everything for it (no stream trying again and again)");
+  const asked0 = c.asked.length; await c.to({ [E(1)]: OFFLINE, [E(2)]: UP }); await c.to({ [E(1)]: OFFLINE, [E(2)]: UP });
+  ok(c.asked.length === asked0 && nothing(c), "while it stays offline nothing is tried, however often Home Assistant's states come round");
+  await c.to({ [E(1)]: UP, [E(2)]: UP });
+  ok(c.open.has(E(1)) && !!c._warm && txt(c) === "Watching for people" && c._config.camera === E(1), "back online: picked up again by itself, the configuration untouched");
+  // taken out of Protect while the card is following someone on it
+  c.open.get(E(1))({ clockWall: Date.now() - 400, tracks: [{ id: "p", coord: [400, 300, 60, 160], objectType: "person", stationary: false }] });
+  ok(!!c._active, "(someone is being followed)");
+  c.open.get(E(1))({ status: "removed" });
+  ok(c._state === "removed" && !c._active && nothing(c) && /no longer in UniFi Protect/.test(txt(c)) && !c._root.querySelector(".frame").classList.contains("active"), "the camera is taken out of Protect in mid-follow: the relay says so, the card ends cleanly and says why");
+  c.disconnectedCallback();
+  // listening refused because the camera has gone
+  c = await mkT({ camera: E(1) }, { reject: { [E(1)]: "camera_removed" } });
+  ok(c._state === "removed" && nothing(c), "asked to listen to a camera the integration says has been removed: the same end, no retry"); c.disconnectedCallback();
+  // every camera watched, one of them taken away: the rest carry on
+  c = await mkT({});
+  ok(c._cams.length === 2 && c.open.size === 2, "(watching two cameras)");
+  await c.to({ [E(1)]: UP, [E(2)]: LET_GO }); c.live = { [E(1)]: "p1" }; await c.to({ [E(1)]: UP, [E(2)]: LET_GO }, { [E(1)]: ent(1), [E(2)]: ent(2) });
+  ok(c._cams.length === 1 && c._cams[0].id === "p1" && c.open.has(E(1)) && !c.open.has(E(2)) && !c._state, "watching every camera, one is removed: it is dropped and the other carries on");
+  // ... and a camera adopted while the card is open is taken up without a reload
+  c.live = { [E(1)]: "p1", [E(3)]: "p3" }; await c.to({ [E(1)]: UP, [E(3)]: UP }, { [E(1)]: ent(1), [E(3)]: { device_id: "d3", platform: "unifiprotect" } });
+  ok(c._cams.map((x) => x.id).join() === "p3,p1" || c._cams.map((x) => x.id).sort().join() === "p1,p3", "a camera adopted meanwhile: watched too, with no reload: " + c._cams.map((x) => x.id).join());
+  c.disconnectedCallback();
+  // one of two offline: the other is still watched; both offline: quiet
+  c = await mkT({}, { states: { [E(1)]: UP, [E(2)]: OFFLINE } }); ok(c.open.size === 2 && txt(c) === "Watching for people", "one of two cameras offline: the card goes on watching");
+  await c.to({ [E(1)]: OFFLINE, [E(2)]: OFFLINE }); ok(txt(c) === "Cameras offline" && nothing(c), "all of them offline: 'Cameras offline', nothing running"); c.disconnectedCallback();
+  // the editor: a stale choice is said to be stale
+  { const e = Trk.getConfigElement(); e.hass = h0; e.setConfig({ camera: E(3) }); e.connectedCallback();
+    ok(e._gone.hidden === false && /no longer in UniFi Protect\. Pick another/.test(e._gone.textContent) && e._form.data.camera === E(3), "the editor: a camera that has been removed is still shown as the choice, and said to be gone (not a blank field)");
+    e.setConfig({ camera: E(2) }); ok(/offline for now/.test(e._gone.textContent), "an offline one: said to be offline, and that it comes back by itself");
+    e.setConfig({ camera: E(1) }); ok(e._gone.hidden === true, "one that is there: nothing said"); e.setConfig({}); ok(e._gone.hidden === true, "none picked: nothing said"); }
+
+  // --- the detection history
+  { const d = new Det(); d.setConfig({});
+    const gone = { id: "e1", camera: "Shed", camera_removed: true, entity: null, tap_entity: null }; const here = { id: "e2", camera: "One", entity: E(1), tap_entity: E(1) };
+    ok(d._inScope(gone) === true && d._camName(gone) === "Shed (removed)" && d._camName(here) === "One", "history showing every camera: a removed camera's detections stay, labelled as removed");
+    ok(d._camName({ camera: "Removed camera", camera_removed: true }) === "Removed camera", "(one whose name was never known is just 'Removed camera')");
+    const named = new Det(); named.setConfig({ cameras: [{ entity: E(1), tap_entity: E(1), name: "One" }, { entity: "camera.other" }] });
+    ok(named._inScope(gone) === false && named._inScope(here) === true && named._inScope({ entity: null, tap_entity: undefined }) === false, "a history with its cameras named leaves them out (and a detection with no entity is not taken for one of its cameras by accident)");
+    const wallHist = new Det(); wallHist.setConfig({ cameras: [{ entity: E(1) }], removed: true }); ok(wallHist._inScope(gone) === true, "unless told to keep them, as the camera wall tells its History when its cameras are all that were found"); }
+
+  // --- the camera wall
+  const mkW = async (cfg, states, entities, stored) => { const w = new Wall(); w.clientWidth = 1000; w.isConnected = true; const store = { value: stored || null }; w.store = store; w.lives = 0;
+    const mk = (st, reg) => ({ ...hass, user: { is_admin: true }, config: { components: ["protect_detections"] }, entities: reg, states: st, devices: { d1: { name: "One" }, d2: { name: "Two" }, d3: { name: "Three" } },
+      connection: { subscribeMessage: () => Promise.resolve(() => {}) },
+      callWS: (m) => { if (m.type === "network/url") return Promise.resolve({}); if (m.type.endsWith("/live/cameras")) { w.lives++; return Promise.resolve({ cameras: {} }); }
+        if (m.type === "frontend/get_user_data") return Promise.resolve({ value: store.value }); if (m.type === "frontend/set_user_data") { store.value = m.value; return Promise.resolve({}); } return new Promise(() => {}); } });
+    w.setConfig({ alarm: false, history: false, tracking: false, ...cfg }); w.hass = mk(states, entities); await tick(); await tick(); await tick();
+    w.to = async (st, reg) => { w.hass = mk(st, reg); await tick(); await tick(); await tick(); }; return w; };
+  const names = (w) => w._config.cameras.map((x) => x.name).join();
+  const reg3 = () => ({ [E(1)]: ent(1), [E(2)]: ent(2), [E(3)]: ent(3) });
+  let w = await mkW({}, { [E(1)]: UP, [E(2)]: OFFLINE, [E(3)]: LET_GO }, reg3());
+  ok(names(w) === "One,Two", "wall, cameras found: one removed from Protect has no tile; an offline one keeps its place");
+  ok(w._tiles[1].dataset.cam === "offline" && w._tiles[1].dataset.note === "Offline" && !w._tiles[0].dataset.cam, "the offline camera's tile says 'Offline'; the others say nothing");
+  ok(!w._config.cameras.some((c2) => "status" in c2), "(whether a camera is offline is not part of the wall's list: the wall isn't built anew for that)");
+  const built = w._tiles[0]; await w.to({ [E(1)]: UP, [E(2)]: UP, [E(3)]: LET_GO }, w._hass.entities);
+  ok(!w._tiles[1].dataset.cam && w._tiles[0] === built, "it comes back: the note goes, nothing is rebuilt");
+  // a camera taken out of Protect while the wall is open
+  const reg = w._hass.entities; await w.to({ [E(1)]: UP, [E(2)]: LET_GO, [E(3)]: LET_GO }, reg);
+  ok(names(w) === "One" && w._tiles.filter(Boolean).length === 1, "a camera removed from Protect while the wall is open: its tile goes, with no reload, though Home Assistant's lists have not changed yet");
+  // a camera adopted while the wall is open
+  await w.to({ [E(1)]: UP, [E(2)]: LET_GO, [E(3)]: UP }, { ...reg });
+  ok(names(w) === "One,Three", "a camera adopted (or put back) while the wall is open: its tile appears");
+  w.disconnectedCallback();
+  // which cameras have live boxes is asked again when the cameras change
+  w = await mkW({ tracking: {} }, { [E(1)]: UP, [E(2)]: UP }, { [E(1)]: ent(1), [E(2)]: ent(2) }); const asked1 = w.lives;
+  await w.to({ [E(1)]: UP, [E(2)]: UP, [E(3)]: UP }, reg3());
+  ok(asked1 >= 1 && w.lives > asked1, "the wall asks again which cameras recognise things when its cameras change (it used to ask once, and miss a new camera until a reload)");
+  w.disconnectedCallback();
+  // cameras named in the config: a removed one stays, and its tile says why it is blank
+  w = await mkW({ cameras: [{ entity: E(1), name: "One" }, { entity: "camera.long_gone", name: "Shed" }] }, { [E(1)]: UP }, { [E(1)]: ent(1) });
+  ok(names(w) === "One,Shed" && w._tiles[1].dataset.cam === "removed" && w._tiles[1].dataset.note === "No longer in UniFi Protect" && !w._tiles[0].dataset.cam, "wall, cameras named in the config: one that has gone keeps its tile, which says 'No longer in UniFi Protect'");
+  w.disconnectedCallback();
+  // what is kept of the arrangement for cameras that have gone
+  const stored = { v: 1, walls: { default: { grid: { cols: 3, rows: 2 }, tiles: [{ id: "d1", c: 0, r: 0, w: 1, h: 1 }, { id: "d7", c: 1, r: 0, w: 2, h: 2 }], hidden: ["track:d7"], opts: { "track:d7": { sound: "ping" }, "track:d1": { standby: "pulse" } } } } };
+  w = await mkW({}, { [E(1)]: UP, [E(2)]: UP }, { [E(1)]: ent(1), [E(2)]: ent(2) }, JSON.parse(JSON.stringify(stored)));
+  ok(JSON.stringify(w.store.value) === JSON.stringify(stored), "a camera that was on the wall and has gone: what was kept for it (its place, its tile's options) is left alone");
+  ok(w._staleKeys().sort().join() === "d7,track:d7", "it is known to be stale");
+  w._wallContext(100, 100, null); const items = w._wMenu.menu.children.map((x) => x.textAll).filter(Boolean);
+  ok(items.some((t) => /^Forget a removed camera's place/.test(t)), "and the wall's menu offers to forget it: " + items.find((t) => /^Forget/.test(t)));
+  w._wMenu.menu.children.find((x) => /^Forget/.test(x.textAll)).onclick(); await tick(); await tick();
+  const left = w.store.value.walls.default;
+  ok(left.tiles.map((t) => t.id).join() === "d1" && !left.hidden && JSON.stringify(left.opts) === JSON.stringify({ "track:d1": { standby: "pulse" } }) && w._staleKeys().length === 0, "asked to: only what belonged to the camera that has gone is forgotten; the rest of the arrangement stays");
+  w._wallContext(100, 100, null); ok(!w._wMenu.menu.children.some((x) => /^Forget/.test(x.textAll || "")), "nothing stale: nothing offered"); w._wMenuClose();
+  w.disconnectedCallback();
+  // the wall's History keeps a removed camera's detections when its cameras are all that were found
+  { const w2 = new Wall(); w2._given = { }; w2._hass = { ...hass, config: { components: ["protect_detections"] }, entities: { [E(1)]: ent(1) }, states: { [E(1)]: UP }, devices: { d1: { name: "One" } } };
+    ok(w2._resolve().history_removed === true, "the wall tells its History to keep them when its cameras are the ones found");
+    w2._given = { exclude: ["One"] }; ok(w2._resolve().history_removed === false, "not when some cameras are left out (it can't tell whose a removed one's were)");
+    w2._given = { cameras: [{ entity: E(1) }] }; ok(!w2._resolve().history_removed, "nor when the cameras are named"); }
   ctx.setTimeout = realTimeout; ctx.localStorage.store = {};
 }
 // --- the tracking card's "Last seen", from the integration's record

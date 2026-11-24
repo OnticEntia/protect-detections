@@ -127,6 +127,7 @@ Takes no space on the page by itself; the camera wall creates one for its Histor
 | `aspect_ratio` | `1.7778` | Width / height of the player. |
 | `protect_url` | from the camera's device | The address of your Protect console, for the link on a detection's id. |
 | `protect_event_url` | `{base}/protect/events/event/{id}` | The pattern of that link (`{base}`, `{id}`, `{camera}`), or `false` for no link. |
+| `removed` | with no cameras named | `true`: with cameras named, also show the detections of cameras that are no longer in Protect (the camera wall sets this for its History). |
 
 ### Tracking card
 
@@ -206,6 +207,14 @@ With "reduce motion" set on the device there are no flights or pulsing. `box_sty
 - In the card's editor, every click on a sound plays it, the one already picked included, and letting go of the volume slider plays the picked sound at the new volume. If nothing can be heard, the editor says why beside the picker.
 
 **"Last seen"** comes from the integration's own record (below), so it is the same on every device and counts what came by while no dashboard was open.
+
+## Cameras that go offline, are removed, or are added
+
+- **Offline** (Protect still has the camera; Home Assistant shows it as unavailable): its tile on the wall says *Offline*, a tracking card says *Camera offline* and stops its stream and its listening, and both pick up again by themselves when it is back. Nothing is changed in your configuration.
+- **Removed from Protect:** a camera that was found is taken off the wall and out of the tracking cards' lists, without a reload. A card set to that camera by name says "This camera is no longer in UniFi Protect" and runs nothing for it; pick another in its editor, which shows the stale choice as stale. A tile for a camera named in the wall's `cameras:` stays and says so. Anything that was open on it (live boxes, a card following someone) ends cleanly.
+- **Its past stays:** detections of a removed camera remain in the history for as long as Protect has them, labelled "(removed)"; a clip Protect can no longer give fails with a plain message. Its sightings stay on record; nothing more is written for it.
+- **What you arranged is kept:** the place, size and tile options you gave a camera are not deleted when it goes. The wall's menu offers *Forget a removed camera's place* when there is something to forget.
+- **Added:** a camera adopted while Home Assistant is running shows up on the wall and in the tracking cards without a restart.
 
 ## Live boxes
 
@@ -287,6 +296,8 @@ UniFi Protect reports where things are about four times a second, and only once 
 | No Boxes button, no tracking tile | The camera must recognise things (smart detections). |
 | Boxes sit ahead of or behind the picture | The boxes are right in place; what can be off is time. Set `live_debug: true` and read the line on the picture (see [Live boxes](#live-boxes)). "by frame timestamps" needs no adjusting. "by estimate" is a best guess: use `live_offset` (positive if the boxes run ahead of things, negative if they trail). |
 | No sound from the tracking card | A browser plays no sound until the page has been clicked; the speaker mark in the card's corner is highlighted until then. The same mark turns sound off for that browser: click it. A background tab makes no sound. |
+| "This camera is no longer in UniFi Protect" | The camera the card is set to has been removed from Protect. Pick another in the card's editor (on the wall: *Edit this tracker…*, or take the tile off). |
+| A tile or card says "Offline" | Protect still has the camera but it isn't answering. It comes back by itself. |
 | The tracking card didn't react to someone | Ask `protect_detections/live/seen` for that time. A sighting of the right kind means it was reported and the card wasn't listening (it listens only while on screen). A gap means the feed was down. With `source: auto` or `local` and Protect Tracker in use, something only Protect reported does not wake the card. |
 | The tracking card reacts late | Without Protect Tracker it can only react once Protect reports. With it, `source: auto` reacts when the tracker's model first sees the thing. |
 | "Protect Tracker's engine isn't running" / "…is not connected" / "has gone quiet" | The tracker's engine is down or not serving that camera. A card on `auto` carries on with the next best feed by itself; one on `local` waits. |
@@ -311,6 +322,10 @@ python tests/test_sightings.py
 
 ```bash
 python tests/test_interface.py
+```
+
+```bash
+python tests/test_cameras.py
 ```
 
 `hub.smart_cameras()`, `hub.live.subscribe(camera_id, send)` and `hub.record_live(camera_id, packet)` on `hass.data["protect_detections"]` are used by other integrations and are kept stable; the last test checks them.
