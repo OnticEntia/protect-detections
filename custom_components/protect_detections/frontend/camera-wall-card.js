@@ -342,6 +342,7 @@ const LIVE_STYLE = `
   .frame .zoom { position: absolute; inset: 0; transform-origin: 0 0; }
   .frame.zoomed { cursor: grab; touch-action: none; }
   /* what the camera is tracking, live */
+  .lbox[data-view]::after { content: " · camera moving"; font-weight: 400; opacity: .75; }
   .lbox-it.passed { border-style: dashed; }
   .lbox-it.seen { border-style: dotted; }
   button.chip.lsrc { padding-left: 10px; padding-right: 10px; opacity: .85; }
@@ -3105,6 +3106,7 @@ class CameraWallCard extends HTMLElement {
     cancelAnimationFrame(lt.raf);
     if (lt.stop) lt.stop();
     this._ltMark(null);
+    this._ltPan(null);
     this._ltHold(0); // the picture as live as it gets again
     const layer = this._liveRoot && this._liveRoot.querySelector(".lboxes");
     if (layer) {
@@ -3120,6 +3122,11 @@ class CameraWallCard extends HTMLElement {
       this._ltStop();
       return this._ltSync();
     }
+    if (msg && msg.status === "view") {
+      // (the camera's own view starts to move, or comes to rest: protect-live.js has what follows from it)
+      lt.message(msg);
+      return this._ltPan(lt);
+    }
     if (msg && msg.status) {
       // (Protect Tracker's local mode says when its engine's connection goes and comes back)
       if (msg.mode) lt.mode = msg.mode;
@@ -3131,6 +3138,17 @@ class CameraWallCard extends HTMLElement {
       return;
     }
     lt.message(msg);
+    this._ltPan(lt);
+  }
+
+  // The camera's view is moving (a camera that pans, tilts and zooms): said, quietly, on the Boxes button.
+  _ltPan(lt) {
+    const btn = this._liveRoot && this._liveRoot.querySelector(".lbox");
+    if (!btn) return;
+    const moving = !!lt && lt.view === "moving";
+    if (moving === btn.hasAttribute("data-view")) return;
+    if (moving) btn.setAttribute("data-view", "moving");
+    else btn.removeAttribute("data-view");
   }
 
   // The chip beside Boxes says whose boxes are shown, and is where that is

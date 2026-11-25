@@ -270,6 +270,7 @@ UniFi Protect reports where things are about four times a second, and only once 
 - In the live view the chip switches with a click and is remembered in the browser; the wall's `source` option is where it starts. It appears once Protect Tracker has been seen.
 - On the tracking card a small "local" or "Protect" mark shows whose positions it is following, when there is a choice.
 - A face Protect Tracker finds on a person is drawn with that person and never wakes a card by itself.
+- **A camera that pans, tilts and zooms:** Protect Tracker tells when the camera's view itself is moving. While it is, the tracking card shows a small "camera moving" mark (the wall's live view says it beside *Boxes*) and takes nothing from where boxes go: nobody new wakes it, no sound is made, nothing counts as lost, and it does not stand by. A person already followed stays followed. When the view comes to rest the card starts afresh, keeping only a person still held.
 - Without Protect Tracker nothing changes: `auto` and `protect` are Protect's own, and no chip or mark is shown. (`local` asks for the tracker by name, so a card set to it says the tracker isn't installed.)
 
 ## Privacy and security

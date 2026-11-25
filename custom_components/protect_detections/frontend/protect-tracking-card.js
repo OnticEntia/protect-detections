@@ -147,6 +147,14 @@
  * left for a second and a half it is one view again, on that thing. Parked
  * things get no pane, and a small card (under 260 x 150 px) never splits.
  *
+ * A camera that pans, tilts and zooms. Protect Tracker tells when the
+ * camera's view itself is moving. While it does, the card says "camera
+ * moving" and takes nothing from where boxes go: no one new wakes it (and no
+ * sound is made), nothing is counted as lost or as gone, and it does not
+ * stand by; a person already followed is still followed, by fresh reports
+ * only. When the view has come to rest the card starts afresh (where things
+ * stood, who the subject was), keeping only a person still held.
+ *
  * Standing by, no video is playing: the card listens to where Protect says
  * things are (while it is on screen and the page is in front; not otherwise)
  * and shows a still picture now and then. Tapping it opens the camera.
@@ -597,7 +605,7 @@ const STYLE = `
     line-height: 16px; background: rgba(0,0,0,.62); color: #fff; white-space: nowrap; }
   .chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c, #e0102a); }
   .chip.live i { animation: pulse 1.2s infinite; }
-  .chip.src { font-weight: 500; font-size: 11px; padding: 2px 7px; opacity: .75; }
+  .chip.src, .chip.pan { font-weight: 500; font-size: 11px; padding: 2px 7px; opacity: .75; }
   .chip[hidden] { display: none; } /* (the warning chip showed as an empty pill: display above beat the hidden attribute) */
   .chip.warn { background: color-mix(in srgb, var(--warning-color, #fbbf24) 80%, #000); color: #000; }
   @keyframes pulse { 50% { opacity: .25; } }
@@ -1072,7 +1080,7 @@ class ProtectTrackingCard extends HTMLElement {
           <div class="zoomer"><div class="video"></div><div class="boxes"></div></div>
           <div class="scan"><div class="grid"></div><div class="sweep"></div><div class="rings"><i></i><i></i><i></i></div><div class="line"></div><div class="blips"></div><div class="reticle"></div></div>
           <div class="idle"><ha-icon icon="mdi:account-eye-outline"></ha-icon><b></b><span></span><small></small><small class="note"></small></div>
-          <div class="top"><span class="chip live"><i></i><span class="cam"></span></span><span class="chip src" hidden></span><span class="chip warn" hidden></span></div>
+          <div class="top"><span class="chip live"><i></i><span class="cam"></span></span><span class="chip src" hidden></span><span class="chip pan" hidden>camera moving</span><span class="chip warn" hidden></span></div>
           <div class="info"></div>
           <div class="panes"></div>
           <div class="tether"></div>
@@ -1100,6 +1108,7 @@ class ProtectTrackingCard extends HTMLElement {
       this._markClick();
     });
     this._mark();
+    this._panMark();
     this._idle();
   }
 
@@ -1121,6 +1130,7 @@ class ProtectTrackingCard extends HTMLElement {
     else if (this._state === "removed") text = this._config.embedded ? "This camera is no longer in UniFi Protect" : "This camera is no longer in UniFi Protect. Pick another in the card's editor";
     else if (this._state === "nocams") text = this._config.camera ? "This camera doesn't recognise things" : "No camera here recognises things";
     else if (this._offline()) text = cams.length === 1 ? "Camera offline" : "Cameras offline";
+    else if (this._panning && this._listening !== false && this._cams) text = `Watching for ${this._what()} · camera moving`;
     else if (!this._cams) text = "Looking for cameras…";
     else if (this._listening === false) text = "Paused while out of sight";
     status.textContent = text;
@@ -1363,8 +1373,43 @@ class ProtectTrackingCard extends HTMLElement {
     this._idle();
   }
 
+  // The camera's view has started to move, or has come to rest (Protect Tracker says).
+  _viewChanged(sub) {
+    sub.view = sub.lt.view;
+    const a = this._active;
+    if (a && a.sub === sub && sub.view === "steady") {
+      // at rest again: what was remembered of the picture before no longer holds
+      a.spots = new Map();
+      a.banned = new Map();
+      a.faceRel = null;
+      const kept = a.subject != null && sub.lt.tracks.has(a.subject);
+      if (!kept) {
+        // (ids are new now: the next thing moving is taken at once, with no "it went and something else is there" wait)
+        a.subject = null;
+        a.subjectBox = null;
+        a.subjectAt = Date.now() - SWITCH_MS;
+      }
+    }
+    this._panMark();
+    if (!this._active) this._idle();
+  }
+
+  // The small "camera moving" mark, while any camera watched is.
+  _panMark() {
+    const root = this._root;
+    if (!root) return;
+    const moving = [...((this._subs && this._subs.values()) || [])].some((sub) => sub.lt.view === "moving");
+    this._panning = moving;
+    root.querySelector(".chip.pan").hidden = !moving;
+  }
+
   _message(sub, msg) {
     if (msg && msg.status === "removed") return this._gone();
+    if (msg && msg.status === "view") {
+      sub.lt.message(msg);
+      if (sub.lt.view !== sub.view) this._viewChanged(sub);
+      return;
+    }
     if (msg && msg.status) {
       // (Protect Tracker's local mode tells when its engine's connection goes and comes back)
       const engine = msg.mode === "local" || sub.lt.mode === "local";
@@ -1375,7 +1420,14 @@ class ProtectTrackingCard extends HTMLElement {
       return;
     }
     sub.lt.message(msg);
+    if (sub.lt.view !== (sub.view || "steady")) this._viewChanged(sub);
     if (this._quietNote) this._quietCheck();
+    // (the camera's view is moving: boxes going across the picture are the camera's doing. No one new is
+    // taken up, and no sound is made; someone already followed is kept, in _frame)
+    if (sub.lt.view === "moving") {
+      if (this._active && this._active.sub === sub) sub.matchAt = Date.now();
+      return;
+    }
     const types = this._config.types;
     // (a face found on someone being followed is part of them, not a thing of its own)
     const own = (msg.tracks || []).filter((tr) => tr && tr.of == null);
@@ -1620,8 +1672,13 @@ class ProtectTrackingCard extends HTMLElement {
       return w > 0 && h > 0 ? (w * h) / (p[2] * p[3] + q[2] * q[3] - w * h) : 0;
     };
     const lingerMs = Math.max(1, Number(cfg.linger) || 10) * 1000;
+    const panning = lt.view === "moving";
     let subject = mine.find((n) => n.t.id === a.subject) || null;
-    if (subject) {
+    if (panning) {
+      // nothing is made of where boxes are while the camera moves: not lost, not gone, not another's turn
+      a.subjectAt = now;
+      a.seen = now;
+    } else if (subject) {
       const t = subject.t;
       const still = at - Math.max(t.went, t.first); // how long its box hasn't moved
       let lost = false;
@@ -1646,7 +1703,7 @@ class ProtectTrackingCard extends HTMLElement {
         }
       }
     }
-    if (!subject) {
+    if (!subject && !panning) {
       const tr = a.subject == null ? null : lt.tracks.get(a.subject);
       const early = !!tr && tr.pts.length > 0 && tr.pts[0][0] > at; // (reported, but that moment isn't on screen yet)
       if (!early) {

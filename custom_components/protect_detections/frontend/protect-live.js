@@ -41,6 +41,8 @@ const LIVE_TRANSIT_MS = 330; // the quickest a position of Protect's gets here a
 const LIVE_LOCAL_TRANSIT_MS = -35; // and one of Protect Tracker's: stamped as Protect would, it is here a little before that moment
 const LIVE_GAP_KEEP_S = 30; // "of late", for the quickest message
 const LIVE_LOCAL_HOLD_MS = 1000; // a thing the local model has: Protect's own positions for it are left aside this long
+const LIVE_STRICT_MS = 90; // the camera's view is moving: a box is shown this long past its last report, and not carried on at all
+const LIVE_HELD_MS = 1500; // ... and when it has come to rest, someone reported within this long is the one still held
 const LIVE_SOURCE_MS = 2000; // positions count as local while one made locally came this recently
 // By the camera's stream (0: main, others: the lighter ones), measured:
 const LIVE_STAMP_MS = [-125, -125]; // a frame's timestamp, against the clock its positions carry (minus: the positions' is later). Measured on both: about -125 on the main stream, about -113 on the second
@@ -382,6 +384,12 @@ export class LiveTracks {
     this.lag = null; // (rtp) the frame on screen is this far behind the newest positions
     this.channel = 1;
     this.began = Date.now(); // when listening started (our clock)
+    // Is the camera's view itself moving (a camera that pans, tilts and
+    // zooms)? Protect Tracker says: "moving" | "steady". While it moves,
+    // where things are in the picture says nothing about whether they move.
+    this.view = "steady";
+    this.viewAt = 0; // when (our clock) that last changed
+    this.viewN = 0; // how often it has changed (for those who keep things of their own to clear)
     this.heardAt = 0; // when (our clock) the last message came
     this.whole = false; // do the messages each tell every thing there is (a snapshot)
     this.said = false; // do the messages say who made their positions
@@ -390,8 +398,47 @@ export class LiveTracks {
     this.fit = null; // {sum: per step, n, queue: frames waiting to be judged}
   }
 
+  // The camera's view starts to move, or comes to rest.
+  //  - It starts to move: what is being carried on between reports for
+  //    anything but a person is dropped at once (the sender ends those
+  //    too), and a person's box is from then on only where a report put it:
+  //    not carried on past its last report.
+  //  - It comes to rest: the sender starts afresh, with new ids for all but
+  //    the people it kept hold of. So everything kept here is let go, save
+  //    a person reported until just now, whose memory of where it rested
+  //    and when it last moved starts afresh as well.
+  setView(view) {
+    view = view === "moving" ? "moving" : "steady";
+    if (view === this.view) return;
+    this.view = view;
+    this.viewAt = Date.now();
+    this.viewN++;
+    for (const [id, t] of this.tracks) {
+      const last = t.pts[t.pts.length - 1][0];
+      const held = t.type === "person" && t.of == null && t.end == null && (this.latest == null || this.latest - last <= LIVE_HELD_MS);
+      if (!held) {
+        // (a face goes with its person: kept while its person is)
+        const person = t.of != null ? this.tracks.get(t.of) : null;
+        if (!(person && person.type === "person" && person.end == null && (this.latest == null || this.latest - person.pts[person.pts.length - 1][0] <= LIVE_HELD_MS))) {
+          this.tracks.delete(id);
+          continue;
+        }
+      }
+      t.strict = view === "moving";
+      if (view === "steady") {
+        t.rest = null;
+        t.went = 0;
+        t.first = last; // (as good as newly come into view)
+      }
+    }
+  }
+
   message(msg) {
+    // (told at once, between packets, when the view starts to move or comes to rest)
+    if (msg && msg.status === "view") return this.setView(msg.view);
     if (!msg || msg.status || !Number.isFinite(msg.clockWall)) return;
+    // (every packet says which; one that doesn't, from an older sender or Protect's own feed, means steady)
+    this.setView(msg.view);
     const now = Date.now();
     const local = msg.source === "local";
     this.heardAt = now;
@@ -430,11 +477,14 @@ export class LiveTracks {
       if (!tr || !Array.isArray(tr.coord) || tr.coord.length !== 4) continue;
       let t = this.tracks.get(tr.id);
       if (!t) {
+        // (while the view moves, nothing new is taken up but people: the sender tells of nothing else then)
+        if (this.view === "moving" && tr.objectType !== "person" && tr.objectType !== "face") continue;
         // (there from the start, or come into view since: see LIVE_YOUNG_MS)
         const fresh = now - this.began >= LiveTracks.SETTLE_MS;
         this.tracks.set(tr.id, (t = { id: tr.id, type: tr.objectType || "object", desc: "", pts: [], moved: 0, went: 0, first: at, fresh, rest: null }));
       }
       if (tr.objectType) t.type = tr.objectType;
+      t.strict = this.view === "moving";
       if (tr.desc) t.desc = tr.desc;
       // made by Protect Tracker's own model (Protect's own reports of the same thing come in between: it stays so)
       if (tr.local === true) t.localAt = at;
@@ -456,6 +506,12 @@ export class LiveTracks {
       // moved, as measured: further than a wobble from where it last rested
       const mid = [c[0] + c[2] / 2, c[1] + c[3] / 2];
       const step = Math.max(10, 0.12 * Math.min(c[2], c[3]));
+      // (while the camera's view moves, where a box goes says nothing of the thing moving: left as it was)
+      if (this.view === "moving") {
+        t.rest = mid;
+        while (t.pts.length > 2 && t.pts[0][0] < at - LIVE_KEEP_MS) t.pts.shift();
+        continue;
+      }
       if (!t.rest) t.rest = mid;
       else if (Math.abs(mid[0] - t.rest[0]) >= step || Math.abs(mid[1] - t.rest[1]) >= step) {
         t.rest = mid;
@@ -490,6 +546,8 @@ export class LiveTracks {
     const b = pts[i + 1];
     if (!b) {
       const past = at - a[0];
+      // (the camera's view is moving: only where a report put it, for the length of a frame or two)
+      if (t.strict) return past <= LIVE_STRICT_MS ? a.slice(1) : null;
       if (past > LIVE_HOLD_MS) return null;
       if (t.end != null && past > 40) return null; // (told to have gone)
       // its next position isn't here yet: it keeps moving as it just did, for a moment

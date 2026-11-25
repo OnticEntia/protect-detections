@@ -30,7 +30,7 @@ class El extends Target {
   querySelector(s) { return (this._q[s] ||= Object.assign(new El(), { firstElementChild: new El(), lastElementChild: new El(), sel: s })); }
   querySelectorAll() { return []; }
   appendChild(c) { this.children.push(c); c.parent = this; if (c.__card) { c.isConnected = true; c.connectedCallback?.(); } else c.isConnected = true; return c; }
-  prepend(c) { return this.appendChild(c); } replaceChildren(...c) { this.children = []; for (const x of c) this.appendChild(x); } setAttribute(k, v) { (this.attrs ||= {})[k] = v; } removeAttribute() {}
+  prepend(c) { return this.appendChild(c); } replaceChildren(...c) { this.children = []; for (const x of c) this.appendChild(x); } setAttribute(k, v) { (this.attrs ||= {})[k] = v; } removeAttribute(k) { if (this.attrs) delete this.attrs[k]; }
   remove() { this.isConnected = false; if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this); }
   focus() {} select() {} getAttribute(k) { return (this.attrs || {})[k]; } setPointerCapture() {} releasePointerCapture() {}
   get firstChild() { return this.children[0]; }
@@ -1724,6 +1724,96 @@ ok(w._built && !w._building, "next good config builds after a failure");
     w2._given = { exclude: ["One"] }; ok(w2._resolve().history_removed === false, "not when some cameras are left out (it can't tell whose a removed one's were)");
     w2._given = { cameras: [{ entity: E(1) }] }; ok(!w2._resolve().history_removed, "nor when the cameras are named"); }
   ctx.setTimeout = realTimeout; ctx.localStorage.store = {};
+}
+// --- a camera whose view moves (pan, tilt, zoom): Protect Tracker says when
+{
+  ctx.document.hidden = false; ctx.localStorage.store = {};
+  const realTimeout = ctx.setTimeout; ctx.setTimeout = (f, ms) => (ms >= 100000 ? { held: true } : realTimeout(f, ms));
+  const real = Date.now; const B = 1_700_000_500_000;
+  // --- the shared live code
+  const lt = new ctx.LiveTracks(); let t = 0;
+  const pk = (tracks, view) => { t += 100; Date.now = () => B + t + 7000; lt.message({ clockWall: B + t, clockStream: 5000 + t, clockStreamRate: 1000, source: "local", snapshot: true, ...(view ? { view } : {}), tracks }); Date.now = real; };
+  const P = (x, extra = {}) => ({ id: "L1", coord: [x, 300, 60, 180], objectType: "person", local: true, moving: true, stationary: false, ...extra });
+  const V = (x, id = "L2") => ({ id, coord: [x, 500, 100, 60], objectType: "vehicle", local: true, moving: true, stationary: false });
+  const F = (x) => ({ id: "L1:face", coord: [x + 15, 310, 30, 40], objectType: "face", of: "L1", local: true });
+  for (let k = 0; k < 10; k++) pk([P(100 + k * 5), V(400 + k * 5), F(100 + k * 5)], "steady");
+  ok(lt.view === "steady" && lt.tracks.size === 3 && lt.viewN === 0, "packets saying 'steady': nothing out of the ordinary");
+  const carried = ctx.LiveTracks.at(lt.tracks.get("L2"), lt.latest + 200);
+  ok(!!carried && carried[0] > 445, "(at rest, a thing whose next report is late is carried on as it was moving)");
+  // the view starts to move: told at once, between packets
+  lt.message({ status: "view", view: "moving" });
+  ok(lt.view === "moving" && lt.viewN === 1, "the status message says the view is moving: taken at once, without waiting for a packet");
+  ok(!lt.tracks.has("L2") && lt.tracks.has("L1") && lt.tracks.has("L1:face"), "what is not a person is dropped there and then (nothing of it is carried on); the person held, and their face, are kept");
+  const last = lt.tracks.get("L1").pts.at(-1);
+  ok(ctx.LiveTracks.at(lt.tracks.get("L1"), last[0] + 50)[0] === last[1] && ctx.LiveTracks.at(lt.tracks.get("L1"), last[0] + 200) === null, "the held person's box is only where a report put it: not carried on past its last report");
+  // packets while moving: the person gets fresh boxes; nothing else is taken up; no "moved" is read from it
+  const movedBefore = lt.tracks.get("L1").moved;
+  for (let k = 0; k < 10; k++) pk([P(600 - k * 40), V(100 + k * 50, "L9")], "moving");
+  ok(lt.tracks.get("L1").pts.at(-1)[1] === 240 && !lt.tracks.has("L9"), "while it moves: the person's fresh boxes are taken; anything else in a packet is not taken up");
+  ok(lt.tracks.get("L1").moved === movedBefore && lt.tracks.get("L1").strict === true, "and a box crossing the picture is not read as the thing moving (the camera is)");
+  const mid = ctx.LiveTracks.at(lt.tracks.get("L1"), lt.latest - 50); ok(Math.abs(mid[0] - 260) < 0.01, "(between two fresh reports the box is where it belongs, as ever)");
+  // at rest again
+  pk([P(240)], "steady");
+  ok(lt.view === "steady" && lt.viewN === 2 && lt.tracks.has("L1") && lt.tracks.get("L1").strict === false && lt.tracks.get("L1").went === 0, "the view comes to rest: the held person is kept, their memory of where they rested and when they moved begun afresh");
+  // a packet without the word (an older engine, or Protect's own feed) means steady
+  const old = new ctx.LiveTracks(); old.message({ status: "view", view: "moving" }); Date.now = () => B + 7000; old.message({ clockWall: B, tracks: [] }); Date.now = real;
+  ok(old.view === "steady", "a packet that doesn't say: steady");
+  // everything let go at rest when nobody is held
+  const none = new ctx.LiveTracks(); Date.now = () => B + 7100; none.message({ clockWall: B + 100, view: "steady", tracks: [V(100, "a"), { id: "pp", coord: [1, 1, 50, 50], objectType: "person" }] });
+  Date.now = () => B + 12000; none.message({ clockWall: B + 5000, view: "moving", tracks: [] }); none.message({ clockWall: B + 5100, view: "steady", tracks: [] }); Date.now = real;
+  ok(none.tracks.size === 0, "someone last reported long before is not 'held': at rest, everything from before is let go (ids are new)");
+
+  // --- the tracking card
+  const TR = "protect_tracker/live/subscribe"; const E1 = "camera.p_high_resolution_channel";
+  const mkc = async (cfg) => { let push = null;
+    const h = { ...hass, entities: { [E1]: { device_id: "d1", platform: "unifiprotect" } }, states: { [E1]: { entity_id: E1, state: "recording", attributes: { channel_id: 0 } } }, devices: { d1: { name: "Front" } },
+      connection: { subscribeMessage: (cb, m) => { if (m.type !== TR) return Promise.reject({ code: "unknown_command" }); push = cb; return Promise.resolve(() => {}); } },
+      callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { [E1]: "p1" } }); if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
+    const c = new Trk(); c.setConfig({ linger: 2, source: "local", ...cfg }); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick();
+    Object.assign(c._root.querySelector(".frame"), { clientWidth: 1000, clientHeight: 562 });
+    c.T0 = Date.now(); c.T = 0; c.chimes = 0; const rc = c._chime.bind(c); c._chime = () => { c.chimes++; return rc(); };
+    const at = (f) => { Date.now = () => c.T0 + c.T; try { return f(); } finally { Date.now = real; } };
+    c.status = (m) => at(() => push(m));
+    c.step = (tracks, view) => { c.T += 100; at(() => { push({ clockWall: c.T0 + c.T - 30, clockStream: 9000 + c.T, clockStreamRate: 1000, mode: "local", source: "local", snapshot: true, ...(view ? { view } : {}), tracks }); const a = c._active; if (a) { a.placeAt = 0; a.view.at = a.view.at ? c.T0 + c.T - 100 : 0; c._frame(a); } }); };
+    c.run = (ms, f, view) => { for (let end = c.T + ms; c.T < end; ) c.step(f(c.T + 100), view); }; return c; };
+  const pan = (c) => c._root.querySelector(".chip.pan"); const txt = (c) => c._root.querySelector(".idle span").textContent;
+  const Pp = (x, id = "L1") => ({ id, coord: [x, 300, 60, 180], objectType: "person", local: true, moving: true, stationary: false, confirmed: true });
+  // standing by, the camera starts to move with a person in view: no wake, no sound, a quiet mark
+  let c = await mkc({ sound: "ping" }); c.run(300, () => [], "steady");
+  ok(pan(c).hidden !== false && txt(c) === "Watching for people", "tracking card, camera at rest: no mark");
+  c.status({ status: "view", view: "moving" });
+  ok(pan(c).hidden === false && /camera moving$/.test(txt(c)), "the camera starts to move: a small 'camera moving' mark, at once");
+  c.run(2000, (tt) => [Pp(100 + tt * 0.4)], "moving");
+  ok(!c._active && c.chimes === 0, "someone crossing the picture because the camera is moving: the card isn't woken, and makes no sound");
+  c.run(300, () => [], "steady"); ok(pan(c).hidden === true && txt(c) === "Watching for people", "at rest again: the mark goes");
+  c.run(600, (tt) => [Pp(300 + tt * 0.05, "L7")], "steady"); ok(!!c._active && c._active.subject === "L7" && c.chimes === 1, "then someone really there: woken as usual, one sound");
+  // following, and the camera moves with them
+  c.run(1500, (tt) => [Pp(300 + tt * 0.05, "L7"), { id: "L8", coord: [700, 500, 100, 60], objectType: "vehicle", local: true, moving: true, stationary: false }], "steady");
+  c.status({ status: "view", view: "moving" });
+  c.run(3000, (tt) => [Pp(500 - (tt % 1000) * 0.3, "L7")], "moving");
+  ok(!!c._active && c._active.subject === "L7" && c.chimes === 1 && pan(c).hidden === false, "the camera pans while following: the person stays the subject though their box goes right across the picture (no 'jumped', no 'lost'), and no sound");
+  ok(!c._active.sub.lt.tracks.has("L8"), "(what wasn't a person was dropped when the move began)");
+  // ... even when the person isn't reported for longer than the linger while it moves
+  c.run(4000, () => [], "moving");
+  ok(!!c._active, "nothing reported for 4 s while the camera moves (linger is 2 s): not taken for 'nobody there', the card doesn't stand by");
+  // at rest with the person still held
+  c.run(300, (tt) => [Pp(420, "L7")], "moving"); c.run(500, (tt) => [Pp(420 + (tt % 300) * 0.05, "L7")], "steady");
+  ok(c._active.subject === "L7" && c._active.spots.size === 0 && pan(c).hidden === true && c.chimes === 1, "the camera comes to rest with them still held: still the subject, what was remembered of the old view cleared, no sound");
+  // at rest with nobody held: the next thing is taken up at once; then standby after the linger
+  c.status({ status: "view", view: "moving" }); c.run(2000, () => [], "moving"); c.run(100, () => [], "steady");
+  ok(!!c._active && c._active.subject === null, "comes to rest with nobody held: the old subject is forgotten (its id means nothing now)");
+  c.run(600, (tt) => [Pp(200 + tt * 0.05, "L20")], "steady"); ok(c._active.subject === "L20" && c.chimes === 1, "someone new is taken up at once (and the card, never having stood by, doesn't sound again)");
+  c.run(4000, () => [], "steady"); ok(!c._active, "nobody for longer than the linger, the camera at rest: standing by, as ever");
+  c.disconnectedCallback();
+  // an engine that says nothing of the view: all as before
+  c = await mkc({}); c.run(600, (tt) => [Pp(300 + tt * 0.05)]); ok(!!c._active && pan(c).hidden !== false && c._active.sub.lt.view === "steady", "an engine that doesn't say: steady, and the card as it always was"); c.disconnectedCallback();
+
+  // --- the wall's live boxes
+  { const w = new Wall(); w._liveRoot = new El(); const btn = w._liveRoot.querySelector(".lbox"); const l2 = Object.assign(new ctx.LiveTracks(), { els: new Map() });
+    w._ltMessage(l2, { status: "view", view: "moving" }); ok(l2.view === "moving" && btn.getAttribute("data-view") === "moving", "wall live view: the camera starts to move: said on the Boxes button, at once");
+    Date.now = () => B + 7000; w._ltMessage(l2, { clockWall: B, view: "steady", tracks: [] }); Date.now = real; ok(!btn.hasAttribute("data-view"), "at rest: the mark goes");
+    const css = fs.readFileSync(FRONTEND + "camera-wall-card.js", "utf8"); ok(/\.lbox\[data-view\]::after \{ content: " · camera moving"/.test(css), "(the mark is a quiet word after 'Boxes')"); }
+  ctx.setTimeout = realTimeout; Date.now = real; ctx.localStorage.store = {};
 }
 // --- the tracking card's "Last seen", from the integration's record
 {
