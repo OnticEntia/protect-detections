@@ -58,3 +58,4 @@ jobs:
           python tests/test_sightings.py
           python tests/test_interface.py
           python tests/test_cameras.py
+          python tests/test_ptz.py

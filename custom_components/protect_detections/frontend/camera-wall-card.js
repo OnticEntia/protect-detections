@@ -118,6 +118,8 @@
  *                                           # for them, e.g. {types: [person], linger: 10,
  *                                           # stream: low} (see protect-tracking-card)
  *   live_tracks: false                      # optional: no Boxes button
+ *   ptz: false                              # optional: no presets or patrols for a
+ *                                           # camera that moves (administrators only)
  *   live_delay: 700                         # optional: ms the picture is held back
  *                                           # while Boxes is on (WebRTC)
  *   source: auto                            # optional: whose positions the boxes are:
@@ -155,6 +157,12 @@ const ZONES_KEY = "camera-wall-card:zones";
 // live boxes (needs the Protect Detections backend's live relay)
 const EDIT_DIALOG = "hui-dialog-edit-card"; // Home Assistant's own dialog for editing a card
 const LIVE_BOXES_KEY = "camera-wall-card:live-boxes";
+const PTZ_KEY = "camera-wall-card:ptz"; // "1": the presets and patrols bar is open
+const PTZ_SENT_MS = 2500; // how long a button says it was sent
+const PTZ_ERRORS = {
+  unknown_command: "Home Assistant has to be restarted before cameras can be moved from here",
+  unauthorized: "Only an administrator can move a camera",
+};
 const LIVE_SOURCE_KEY = "camera-wall-card:live-source"; // whose boxes, as picked in the live view
 const LIVE_TRACKER_KEY = "camera-wall-card:live-tracker"; // Protect Tracker has been seen from this browser
 const LIVE_SOURCE_NAMES = { auto: "Auto", local: "Local", protect: "UniFi" };
@@ -334,6 +342,17 @@ const LIVE_STYLE = `
     border-radius: 50%; display: grid; place-items: center; flex: none; }
   button.icon:hover { background: #2d2d2d; }
   button.icon[hidden], button.chip[hidden] { display: none; }
+  /* presets and patrols of a camera that moves (administrators) */
+  .pbar { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; padding: 8px 18px; border-bottom: 1px solid #222; font-size: 12px; color: #9ca3af; }
+  .pbar[hidden] { display: none; }
+  .pbar .lab { margin-left: 8px; white-space: nowrap; }
+  .pbar .note { white-space: nowrap; opacity: .85; }
+  .pbar .err { flex-basis: 100%; color: #fca5a5; font-size: 13px; }
+  .pbar button.chip:disabled { cursor: default; opacity: .55; }
+  .pbar button.chip.sent { color: #fff; border-color: #4ade80; opacity: 1; }
+  .lb.fill .pbar { padding: 4px 10px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .lb.fill .pbar > * { flex: none; }
+  .lb.fill .pbar .err { flex-basis: auto; white-space: nowrap; order: -1; }
   .stage { flex: 1; min-height: 0; display: flex; align-items: center; gap: 12px; padding: 12px; }
   .body { flex: 1; align-self: stretch; min-width: 0; container-type: size; display: grid; place-items: center; }
   .frame { width: min(100cqw, calc(100cqh * var(--ar))); aspect-ratio: var(--ar); background: #000;
@@ -542,6 +561,7 @@ class CameraWallCard extends HTMLElement {
     for (const x of this._xTiles || []) x.card.hass = hass;
     this._markCams();
     this._updateLive();
+    this._ptzState();
   }
 
   /**
@@ -2080,6 +2100,7 @@ class CameraWallCard extends HTMLElement {
           <span class="spacer"></span>
           <button class="chip mic" hidden title="Talk through the camera's speaker"><ha-icon icon="mdi:microphone"></ha-icon><span>Talk</span></button>
           <button class="chip zbtn" hidden title="Show this camera's zones over the picture"><ha-icon icon="mdi:vector-polygon"></ha-icon>Zones</button>
+          <button class="chip pbtn" hidden title="This camera's presets and patrols"><ha-icon icon="mdi:axis-arrow"></ha-icon>PTZ</button>
           <button class="chip lbox" hidden title="Box what the camera is tracking (the picture is held back a little so they line up)"><ha-icon icon="mdi:vector-square"></ha-icon>Boxes</button>
           <button class="chip lsrc" hidden></button>
           <button class="chip hd" title="Full-quality feed (slower through the public address)"><ha-icon icon="mdi:high-definition"></ha-icon>HD</button>
@@ -2087,6 +2108,7 @@ class CameraWallCard extends HTMLElement {
           <button class="icon expand" title="Bigger"><ha-icon icon="mdi:arrow-expand"></ha-icon></button>
           <button class="icon close" title="Close (Esc)"><ha-icon icon="mdi:close"></ha-icon></button>
         </div>
+        <div class="pbar" hidden></div>
         <div class="stage">
           <button class="icon prev" title="Previous camera (←)"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
           <div class="body"><div class="frame" style="--ar:${this._config.aspect_ratio}">
@@ -2120,6 +2142,7 @@ class CameraWallCard extends HTMLElement {
     root.querySelector(".mic").onclick = () => (this._talk ? this._stopTalk() : this._startTalk());
     root.querySelector(".zbtn").onclick = () => this._zEdit || this._zonesToggle();
     root.querySelector(".lbox").onclick = () => this._ltToggle();
+    root.querySelector(".pbtn").onclick = () => this._ptzToggle();
     root.querySelector(".lsrc").onclick = () => this._ltNextSource();
     // Zone menu: right-click on the picture, or a long press on a touch
     // screen. Anywhere else the browser's own menu is left alone.
@@ -2260,6 +2283,180 @@ class CameraWallCard extends HTMLElement {
     this._fitZones();
     this._ltStop(); // the boxes were the other camera's
     this._ltSync();
+    this._ptzShow();
+  }
+
+  // ------------------------------------------------ presets and patrols
+  //
+  // A camera that pans, tilts and zooms gets a PTZ chip in the dialog, for
+  // administrators only: it opens a bar with the camera's presets (Home
+  // first) and its patrols. What the camera has is asked of the backend
+  // (protect_detections/ptz); a button asks the backend to send the camera
+  // there (…/ptz/goto, …/ptz/patrol), which it does through the UniFi
+  // Protect integration's own service and patrol entity, and refuses to
+  // anyone who is not an administrator. The button says when it was sent;
+  // a failure is said on the bar. That the view is then moving is said
+  // where it always is (beside Boxes, from Protect Tracker): nothing here
+  // claims to know where the camera is.
+
+  // The camera on screen, when its presets may be offered to this user.
+  _ptzCam() {
+    const cam = this._liveIndex != null && this._config ? this._config.cameras[this._liveIndex] : null;
+    return cam && this._config.ptz !== false && !this._ptzNone && this._mayEdit() ? cam.entity : null;
+  }
+
+  // The dialog shows a camera: what it has is asked (again, for one that moves: presets change).
+  _ptzShow() {
+    const entity = this._ptzCam();
+    const known = entity ? (this._ptzInfo ||= new Map()).get(entity) : null;
+    if (entity && (known === undefined || (known && known.ptz))) this._ptzAsk(entity);
+    this._ptzSync();
+  }
+
+  _ptzAsk(entity) {
+    const map = (this._ptzInfo ||= new Map());
+    if (!map.has(entity)) map.set(entity, null); // asked, not yet answered
+    const asked = (this._ptzAsked = (this._ptzAsked || 0) + 1);
+    this._hass.callWS({ type: "protect_detections/ptz", entity }).then(
+      (info) => {
+        map.set(entity, info && typeof info === "object" ? info : { ptz: false });
+        if (this._ptzEntity === entity) this._ptzSync();
+      },
+      (err) => {
+        // an older backend, or not an administrator after all: not asked again
+        if (err && (err.code === "unknown_command" || err.code === "unauthorized")) this._ptzNone = true;
+        if (!map.get(entity)) map.set(entity, { ptz: false });
+        if (this._ptzEntity === entity || this._ptzNone) this._ptzSync();
+      }
+    );
+    return asked;
+  }
+
+  _ptzToggle() {
+    try {
+      localStorage.setItem(PTZ_KEY, this._ltPref(PTZ_KEY) ? "0" : "1");
+    } catch (e) {}
+    this._ptzSync();
+  }
+
+  // The chip and the bar, to fit the camera on screen.
+  _ptzSync() {
+    const root = this._liveRoot;
+    if (!root) return;
+    const entity = this._ptzCam();
+    if (this._ptzEntity !== entity) {
+      // another camera (or none): what was said was about the other one
+      this._ptzEntity = entity;
+      this._ptzErr = "";
+      this._ptzSent = null;
+      this._ptzBusy = null;
+      clearTimeout(this._ptzTimer);
+    }
+    const info = entity && this._ptzInfo ? this._ptzInfo.get(entity) : null;
+    const able = !!(info && info.ptz);
+    const btn = root.querySelector(".pbtn");
+    const bar = root.querySelector(".pbar");
+    const open = able && this._ltPref(PTZ_KEY);
+    btn.hidden = !able;
+    btn.classList.toggle("on", open);
+    bar.hidden = !open;
+    this._ptzPainted = null;
+    if (open) this._ptzPaint(bar, info);
+    else bar.replaceChildren();
+  }
+
+  // The patrol entity as Home Assistant has it now (which patrol runs is known from it).
+  _ptzPatrol(info) {
+    const p = info && info.patrol;
+    if (!p || !p.entity) return null;
+    const st = this._hass && this._hass.states[p.entity];
+    const all = st && Array.isArray(st.attributes.options) ? st.attributes.options.filter((o) => o !== "stop") : p.options || [];
+    const state = st ? st.state : p.running;
+    return { options: all, running: all.includes(state) ? state : null, down: st ? st.state === "unavailable" : p.available === false, st };
+  }
+
+  _ptzPaint(bar, info) {
+    const el = (tag, cls, text) => {
+      const e = document.createElement(tag);
+      e.className = cls;
+      if (text != null) e.textContent = text;
+      return e;
+    };
+    const busy = this._ptzBusy;
+    const button = (key, text, icon, title, send) => {
+      const sent = this._ptzSent === key;
+      const b = el("button", "chip pset" + (sent ? " sent" : ""), text);
+      b.dataset.key = key;
+      b.title = sent ? "Sent" : title;
+      if (sent || icon) {
+        const i = document.createElement("ha-icon");
+        i.setAttribute("icon", sent ? "mdi:check" : icon);
+        b.prepend(i);
+      }
+      b.disabled = !!busy; // one command at a time
+      b.onclick = () => this._ptzSend(key, send);
+      return b;
+    };
+    const out = [];
+    if (info.home) out.push(button("p:Home", "Home", "mdi:home-outline", "Send the camera to its home position", { type: "protect_detections/ptz/goto", preset: "Home" }));
+    for (const name of info.presets || [])
+      out.push(button("p:" + name, name, null, "Send the camera to this preset", { type: "protect_detections/ptz/goto", preset: name }));
+    if (!info.home) out.push(el("span", "note", info.presets_error || "Presets cannot be used from here"));
+    else if (!info.presets) out.push(el("span", "note", "The presets could not be read" + (info.presets_error ? ": " + info.presets_error : "")));
+    else if (!info.presets.length) out.push(el("span", "note", "No presets saved in UniFi Protect"));
+    const patrol = this._ptzPatrol(info);
+    this._ptzPainted = patrol ? patrol.st || null : null;
+    if (patrol) {
+      out.push(el("span", "lab", "Patrol"));
+      if (patrol.down) out.push(el("span", "note", "not available just now"));
+      else if (!patrol.options.length) out.push(el("span", "note", "none set up in UniFi Protect"));
+      else {
+        for (const name of patrol.options) {
+          const b = button("r:" + name, name, "mdi:rotate-right", patrol.running === name ? "This patrol is running" : "Start this patrol", { type: "protect_detections/ptz/patrol", option: name });
+          if (patrol.running === name) b.classList.add("on");
+          out.push(b);
+        }
+        out.push(button("r:stop", "Stop", "mdi:stop", patrol.running ? "Stop the patrol" : "No patrol is running", { type: "protect_detections/ptz/patrol", option: "stop" }));
+      }
+    }
+    if (this._ptzErr) out.push(el("span", "err", this._ptzErr));
+    bar.replaceChildren(...out);
+  }
+
+  // Home Assistant has news: the bar follows the patrol that runs.
+  _ptzState() {
+    if (!this._ptzEntity || !this._liveRoot || !this._ptzInfo) return;
+    const info = this._ptzInfo.get(this._ptzEntity);
+    if (!info || !info.ptz || !info.patrol || !this._ltPref(PTZ_KEY)) return;
+    const st = (this._hass && this._hass.states[info.patrol.entity]) || null;
+    if (st !== this._ptzPainted) this._ptzSync();
+  }
+
+  async _ptzSend(key, msg) {
+    const entity = this._ptzEntity;
+    if (!entity || this._ptzBusy) return;
+    this._ptzBusy = key;
+    this._ptzErr = "";
+    this._ptzSent = null;
+    clearTimeout(this._ptzTimer);
+    this._ptzSync();
+    let failed = "";
+    try {
+      await this._hass.callWS({ ...msg, entity });
+    } catch (err) {
+      failed = PTZ_ERRORS[err && err.code] || (err && err.message) || "The command could not be sent";
+    }
+    if (this._ptzEntity !== entity || this._ptzBusy !== key) return; // the dialog has moved on
+    this._ptzBusy = null;
+    if (failed) this._ptzErr = failed;
+    else {
+      this._ptzSent = key;
+      this._ptzTimer = setTimeout(() => {
+        this._ptzSent = null;
+        this._ptzSync();
+      }, PTZ_SENT_MS);
+    }
+    this._ptzSync();
   }
 
   // ------------------------------------------------- landscape on a phone
@@ -3617,6 +3814,7 @@ class CameraWallCard extends HTMLElement {
     clearInterval(this._soundTimer);
     window.removeEventListener("keydown", this._onLiveKey);
     this._liveIndex = null;
+    this._ptzSync(); // (no camera: the bar goes)
     this._phoneLeave(); // the screen as it was
     this._liveHost.style.display = "none";
     this._liveRoot.querySelector(".video").replaceChildren(); // stops the stream
@@ -4324,7 +4522,7 @@ class CameraWallCard extends HTMLElement {
 // shows what the wall does by default, and stays left out until it is
 // changed. The camera lists (`cameras`, a `history` list), `alarm_modes`,
 // `breakpoints` and a tracking tile's options (`tracking: {...}`) are YAML.
-const WALL_DEFAULTS = { history: true, tracking: true, arrange: true, aspect_ratio: 1.7778, live_tracks: true, source: "auto", live_delay: 700, live_offset: 0, live_debug: false, zone_overlay: true, phone_landscape: true };
+const WALL_DEFAULTS = { history: true, tracking: true, arrange: true, aspect_ratio: 1.7778, live_tracks: true, ptz: true, source: "auto", live_delay: 700, live_offset: 0, live_debug: false, zone_overlay: true, phone_landscape: true };
 const WALL_SWITCH_OR_MORE = ["history", "tracking"]; // false, or left out, or more said in YAML
 const WALL_FORM = [
   { name: "exclude", selector: { text: { multiple: true } } },
@@ -4336,6 +4534,7 @@ const WALL_FORM = [
   { name: "layout", selector: { text: {} } },
   { name: "aspect_ratio", selector: { number: { min: 0.5, max: 3, step: 0.0001, mode: "box" } } },
   { name: "live_tracks", selector: { boolean: {} } },
+  { name: "ptz", selector: { boolean: {} } },
   { name: "source", selector: { select: { options: [{ value: "auto", label: "Auto: the live view shows the best of both; the tracking tiles go by Protect Tracker's own sightings first" }, { value: "local", label: "Local: only Protect Tracker's own" }, { value: "protect", label: "UniFi: only UniFi Protect's own" }] } } },
   { name: "live_delay", selector: { number: { min: 0, max: 3000, step: 50, mode: "box", unit_of_measurement: "ms" } } },
   { name: "live_offset", selector: { number: { min: -3000, max: 3000, step: 10, mode: "box", unit_of_measurement: "ms" } } },
@@ -4347,7 +4546,7 @@ const WALL_FORM = [
 ];
 const WALL_LABELS = { exclude: "Cameras to leave out (names, entity ids or device ids)", order: "Cameras to put first, in this order", alarm: "Alarm panel (empty: the one that is found)",
   history: "History button", tracking: "Tracking tiles", arrange: "Arrange button", layout: "Name of this wall's saved arrangement (empty: default)", aspect_ratio: "Shape of each feed (width / height)",
-  live_tracks: "Boxes button in the live view", source: "Whose boxes", live_delay: "Live picture held back for the boxes", live_offset: "Draw the boxes later (+) or earlier (−)",
+  live_tracks: "Boxes button in the live view", ptz: "Presets and patrols of a camera that moves (administrators)", source: "Whose boxes", live_delay: "Live picture held back for the boxes", live_offset: "Draw the boxes later (+) or earlier (−)",
   live_debug: "Write on the live picture how the boxes are timed", zone_overlay: "Zones in the live view", phone_landscape: "Turn the live view on a phone", local_url: "Local address (empty: Home Assistant's)", remote_url: "Remote address (empty: Home Assistant's)" };
 
 class CameraWallCardEditor extends HTMLElement {

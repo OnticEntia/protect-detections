@@ -78,6 +78,7 @@ Best in a view of type *Panel*. With no options it shows one feed per UniFi Prot
 
 - **Tap a feed** to open its live view: digital zoom (wheel, pinch, drag), HD toggle, two-way talk on cameras with a speaker, zones (with Protect Zones), and a *Boxes* button on cameras that recognise things.
 - **Boxes** draws a box on everything the camera is tracking, matched to the picture frame by frame (see [Live boxes](#live-boxes)). With Protect Tracker installed, a chip beside it chooses whose boxes: *Auto*, *Local* or *UniFi* (see [With Protect Tracker](#with-protect-tracker)).
+- **PTZ** (administrators, on a camera that pans, tilts and zooms): a chip that opens the camera's presets and patrols (see [Cameras that move](#cameras-that-move-presets-and-patrols)).
 - **Tracking tiles** are tracking cards, one per camera, among the feeds.
 - **Arrange** (the button beside History): drag tiles to any cell of a grid, resize them, add or remove rows and columns. On a phone the wall is a list and arranging changes its order.
 - **Right-click** (press and hold on a touch screen) for a menu: resize a tile, take it off the wall or put it back, add or remove a camera's tracking tile, and on a tracking tile what it watches for and how it looks.
@@ -103,6 +104,7 @@ Best in a view of type *Panel*. With no options it shows one feed per UniFi Prot
 | `layout` | `default` | A name for this wall's saved arrangement, if you have several walls. |
 | `tracking` | on | `false` for no tracking tiles, or options for all of them (any of the tracking card's), e.g. `{types: [person], stream: low}`. |
 | `live_tracks` | `true` | `false` hides the Boxes button. |
+| `ptz` | `true` | `false` hides the presets and patrols of a camera that moves. |
 | `source` | `auto` | Whose positions: `auto`, `local` or `protect`. It is where the live view's chip starts, and what the tracking tiles use (see [With Protect Tracker](#with-protect-tracker)). |
 | `live_delay` | `700` | Milliseconds the live picture is held back while Boxes is on, so the boxes can keep up with it. |
 | `live_offset` | `0` | A trim: milliseconds to draw the boxes later (+) or earlier (−). Not normally needed. |
@@ -216,6 +218,24 @@ With "reduce motion" set on the device there are no flights or pulsing. `box_sty
 - **What you arranged is kept:** the place, size and tile options you gave a camera are not deleted when it goes. The wall's menu offers *Forget a removed camera's place* when there is something to forget.
 - **Added:** a camera adopted while Home Assistant is running shows up on the wall and in the tracking cards without a restart.
 
+## Cameras that move: presets and patrols
+
+For a camera that pans, tilts and zooms, the wall's live view has a **PTZ** chip. It opens a bar with:
+
+- **Presets:** *Home* first, then the presets saved in Protect, by name. A press sends the camera there.
+- **Patrol:** one button per patrol defined in Protect, and *Stop*. The patrol that is running is lit.
+
+How it behaves:
+
+- **Administrators only.** Other users do not get the chip, and the integration refuses the requests from anyone else whatever the page shows.
+- **Only for cameras that move.** Nothing changes for the others.
+- **Feedback:** the button shows a tick when the command was sent. A failure is written on the bar in plain words. Where the camera then is, the bar does not claim to know; with Protect Tracker, "camera moving" appears beside *Boxes* while the view moves.
+- **When something is missing:** if the presets cannot be read, *Home* is offered alone with the reason. If Home Assistant's UniFi Protect integration has no preset service, the bar says so. With no patrols defined it says that instead of showing buttons.
+- **How the commands go:** through Home Assistant's own UniFi Protect integration, its `unifiprotect.ptz_goto_preset` action and its patrol entity, in the name of the user who pressed. This integration sends nothing to Protect itself; it only reads the list of presets.
+- **Not there:** aiming by dragging or clicking in the picture, and saving presets. Use the Protect app for those.
+
+`ptz: false` on the wall hides it. Home Assistant's own action and patrol entity are available to automations and to any user Home Assistant lets call them; that is Home Assistant's to restrict, not this card's.
+
 ## Live boxes
 
 The boxes on the live picture (the wall's *Boxes*, and everything the tracking card draws) are placed by time: a box belongs to one moment of the camera's picture, and is drawn when that moment is on screen.
@@ -283,7 +303,7 @@ UniFi Protect reports where things are about four times a second, and only once 
 - **What the browser remembers:** small preferences only (whether Boxes is on, the *Auto / Local / UniFi* choice, sound turned off, and a fallback "last seen" time). Your wall arrangement and tile options are kept in your Home Assistant user data.
 - **Talk** sends your browser's microphone audio to the camera's speaker. Browsers only allow the microphone over https; on a plain http address the wall opens a small talk window on your https address instead.
 - **The card files are public**, like Home Assistant's own frontend files: they contain code only, no data, and are served without a login.
-- **Nothing is written to Protect** by this integration. (Zone editing is done by Protect Zones and is limited to administrators there.)
+- **Nothing is written to Protect** by this integration. (Zone editing is done by Protect Zones and is limited to administrators there.) The one way it can change anything: an administrator pressing a preset or patrol button in the live view of a camera that moves, which goes through Home Assistant's UniFi Protect integration (see [Cameras that move](#cameras-that-move-presets-and-patrols)).
 
 ## Troubleshooting
 
@@ -327,6 +347,10 @@ python tests/test_interface.py
 
 ```bash
 python tests/test_cameras.py
+```
+
+```bash
+python tests/test_ptz.py
 ```
 
 `hub.smart_cameras()`, `hub.live.subscribe(camera_id, send)` and `hub.record_live(camera_id, packet)` on `hass.data["protect_detections"]` are used by other integrations and are kept stable; the last test checks them.

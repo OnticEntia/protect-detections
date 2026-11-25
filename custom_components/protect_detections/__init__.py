@@ -18,6 +18,8 @@ Frontend access:
   websocket  protect_detections/overlaps    other detections' boxes during a clip
   websocket  protect_detections/live/...    where things are right now (live.py)
   websocket  protect_detections/live/seen   what live tracking saw, kept here (sightings.py)
+  websocket  protect_detections/ptz, ptz/goto, ptz/patrol   presets and patrols of a camera
+             that moves, for administrators (ptz.py)
   http       /protect_detections/frontend/<version>/<file>   the cards (cards.py)
   http       /api/protect_detections/thumb/object/<thumbnail id>
              /api/protect_detections/thumb/event/<event id>
@@ -67,6 +69,7 @@ from .cameras import CameraBook
 from .cards import CardsView, async_card_urls, load_cards, unload_cards
 from .clips import ClipStore
 from .live import LiveTracks
+from .ptz import Ptz, Refused
 from .sightings import SightingRecorder
 from .talk import TalkView, speakers
 
@@ -845,6 +848,92 @@ def _no_camera(hub: DetectionHub, connection: websocket_api.ActiveConnection, ms
         connection.send_error(msg["id"], "not_found", "Not a UniFi Protect camera")
 
 
+def _ptz(hass: HomeAssistant, hub: DetectionHub) -> Ptz:
+    """The presets and patrols requests (ptz.py), over this Home Assistant."""
+    reg = er.async_get(hass)
+
+    def camera(entity: str) -> tuple[Any, bool]:
+        cam_id, removed = hub.book.of_entity(entity)
+        if cam_id is None:
+            hub.refresh_cameras()  # a camera added since we last looked
+            cam_id, removed = hub.book.of_entity(entity)
+        api = hub.api
+        if removed or cam_id is None or api is None:
+            return None, removed
+        return api.bootstrap.cameras.get(cam_id), False
+
+    def device(entity: str) -> str | None:
+        entry = reg.async_get(entity)
+        return entry.device_id if entry else None
+
+    def patrol(device_id: str) -> dict[str, Any] | None:
+        for entry in er.async_entries_for_device(reg, device_id):
+            if entry.domain != "select" or entry.platform != "unifiprotect" or not entry.unique_id.endswith("_ptz_patrol"):
+                continue
+            state = hass.states.get(entry.entity_id)
+            return {
+                "entity": entry.entity_id,
+                "options": list(state.attributes.get("options") or []) if state else [],
+                "state": state.state if state else None,
+            }
+        return None
+
+    async def call(domain: str, service: str, data: dict[str, Any], context: Any) -> None:
+        await hass.services.async_call(domain, service, data, blocking=True, context=context)
+
+    return Ptz(camera=camera, device=device, patrol=patrol, has_service=hass.services.has_service, call=call)
+
+
+async def _ptz_answer(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any], what: str) -> None:
+    """One of the three requests of ptz.py, answered (administrators only: refused there)."""
+    hub: DetectionHub | None = hass.data.get(DOMAIN)
+    if hub is None:
+        connection.send_error(msg["id"], "not_loaded", "Protect Detections isn't loaded")
+        return
+    ptz = _ptz(hass, hub)
+    admin = bool(connection.user and connection.user.is_admin)
+    try:
+        if what == "info":
+            result = await ptz.info(admin, msg["entity"])
+        elif what == "goto":
+            result = await ptz.goto(admin, msg["entity"], msg["preset"], connection.context(msg))
+        else:
+            result = await ptz.patrol(admin, msg["entity"], msg["option"], connection.context(msg))
+    except Refused as err:
+        connection.send_error(msg["id"], err.code, err.message)
+        return
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/ptz", vol.Required("entity"): str})
+@websocket_api.async_response
+async def ws_ptz(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Whether a camera moves, and its presets and patrols (read only)."""
+    await _ptz_answer(hass, connection, msg, "info")
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): f"{DOMAIN}/ptz/goto",
+    vol.Required("entity"): str,
+    vol.Required("preset"): vol.All(str, vol.Length(min=1, max=100)),
+})
+@websocket_api.async_response
+async def ws_ptz_goto(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Send a camera to a preset, by the UniFi Protect integration's own service."""
+    await _ptz_answer(hass, connection, msg, "goto")
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): f"{DOMAIN}/ptz/patrol",
+    vol.Required("entity"): str,
+    vol.Required("option"): vol.All(str, vol.Length(min=1, max=100)),
+})
+@websocket_api.async_response
+async def ws_ptz_patrol(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Start or stop a camera's patrol, by the UniFi Protect integration's own patrol entity."""
+    await _ptz_answer(hass, connection, msg, "patrol")
+
+
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/live/cameras"})
 @callback
 def ws_live_cameras(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
@@ -980,6 +1069,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_api.async_register_command(hass, ws_live_cameras)
         websocket_api.async_register_command(hass, ws_live_subscribe)
         websocket_api.async_register_command(hass, ws_live_seen)
+        websocket_api.async_register_command(hass, ws_ptz)
+        websocket_api.async_register_command(hass, ws_ptz_goto)
+        websocket_api.async_register_command(hass, ws_ptz_patrol)
         hass.data[TALK_VIEW] = TalkView()
         hass.http.register_view(hass.data[TALK_VIEW])
         hass.http.register_view(ThumbnailView())

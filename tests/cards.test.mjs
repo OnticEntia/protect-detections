@@ -2586,4 +2586,108 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const w8 = await mk({ phone_landscape: false }); w8._openLive(0); ok(!w8._phone, "phone_landscape: false keeps the ordinary dialog"); w8._closeLive();
   coarse = false; win.innerWidth = 1200; win.innerHeight = 800; delete win.screen;
 }
+// --- presets and patrols of a camera that moves (the live view's PTZ bar)
+{
+  // camera.m moves, camera.f does not; nothing here is a real camera and nothing is sent anywhere but to this stand-in
+  const INFO = { ptz: true, home: true, presets: ["Drive", "Gate"], presets_error: null, patrol: { entity: "select.m_patrol", options: ["Round", "Night"], running: null, available: true } };
+  const mkP = async ({ admin = true, info = INFO, infoErr = null, send = () => Promise.resolve({ sent: 1 }), cfg = {}, states = {} } = {}) => {
+    const asked = [], sent = [];
+    const h = { ...hass, user: admin === null ? undefined : { is_admin: admin }, entities: {}, devices: {}, states: { ...states },
+      connection: { subscribeMessage: () => Promise.resolve(() => {}) },
+      callWS: (m) => { if (m.type === "network/url") return Promise.resolve({});
+        if (m.type === "protect_detections/ptz") { asked.push(m.entity); return infoErr ? Promise.reject(infoErr) : Promise.resolve(m.entity === "camera.m" ? (typeof info === "function" ? info() : info) : { ptz: false }); }
+        if (m.type.startsWith("protect_detections/ptz/")) { sent.push(m); return send(m); }
+        if (m.type.endsWith("/live/cameras")) return Promise.reject({ code: "unknown_command" });
+        return new Promise(() => {}); } };
+    const w = new Wall(); w.clientWidth = 1000; w.isConnected = true;
+    w.setConfig({ cameras: [{ entity: "camera.m", name: "M" }, { entity: "camera.f", name: "F" }], alarm: false, history: false, arrange: false, tracking: false, ...cfg });
+    w.hass = h; await tick(); await tick(); await tick();
+    return Object.assign(w, { asked, sent, h });
+  };
+  const chip = (w) => w._liveRoot.querySelector(".pbtn"), bar = (w) => w._liveRoot.querySelector(".pbar");
+  const kids = (w) => bar(w).children, texts = (w) => kids(w).map((c) => c.textContent);
+  const btn = (w, key) => kids(w).find((c) => c.dataset.key === key);
+  const has = (el, c) => ` ${el.className || ""} `.includes(` ${c} `) || el.classList.contains(c); // (the stand-in page keeps the two apart)
+  const soon = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); }; // (sooner than the "sent" mark is taken off again)
+  ctx.localStorage.store = {};
+  // an administrator, a camera that moves
+  let w = await mkP(); w._openLive(0); await tick();
+  ok(w.asked.join() === "camera.m" && chip(w).hidden === false && bar(w).hidden === true && kids(w).length === 0 && w.sent.length === 0, "a camera that moves, for an administrator: a PTZ chip; the bar is closed until asked for and nothing is sent");
+  chip(w).onclick();
+  ok(bar(w).hidden === false && chip(w).classList.contains("on") && texts(w).join("|") === "Home|Drive|Gate|Patrol|Round|Night|Stop", "the chip opens the bar: Home first, the presets, then the patrols and Stop");
+  ok(ctx.localStorage.store["camera-wall-card:ptz"] === "1" && w.sent.length === 0, "that it is open is remembered; opening it sends nothing");
+  // a preset
+  let done; w = Object.assign(w, {}); w.h.callWS = ((orig) => (m) => (m.type === "protect_detections/ptz/goto" ? (w.sent.push(m), new Promise((res, rej) => { done = { res, rej }; })) : orig(m)))(w.h.callWS);
+  btn(w, "p:Gate").onclick();
+  ok(w.sent.length === 1 && w.sent[0].type === "protect_detections/ptz/goto" && w.sent[0].entity === "camera.m" && w.sent[0].preset === "Gate", "a preset button asks the backend to send this camera there");
+  ok(kids(w).filter((c) => c.dataset.key).every((c) => c.disabled === true), "while it is being sent the buttons wait");
+  btn(w, "p:Home").onclick(); ok(w.sent.length === 1, "(a second press meanwhile sends nothing)");
+  done.res({ sent: "Gate" }); await soon();
+  ok(has(btn(w, "p:Gate"), "sent") && btn(w, "p:Gate").title === "Sent" && btn(w, "p:Gate").children[0].attrs.icon === "mdi:check" && btn(w, "p:Gate").disabled === false && !has(btn(w, "p:Home"), "sent"), "sent: that button says so, and the buttons work again");
+  ok(!texts(w).some((t) => /moving/i.test(t)), "(the bar does not say where the camera is)");
+  await tick(); ok(!has(btn(w, "p:Gate"), "sent") && btn(w, "p:Gate").title !== "Sent", "after a moment the button is as it was");
+  // Home, and a failure
+  btn(w, "p:Home").onclick(); ok(w.sent[1].preset === "Home", "Home is a preset of its own");
+  done.rej({ code: "failed", message: "UniFi Protect did not take the command" }); await soon();
+  ok(texts(w).at(-1) === "UniFi Protect did not take the command" && kids(w).at(-1).className === "err" && !has(btn(w, "p:Home"), "sent") && btn(w, "p:Home").disabled === false, "a failure is said plainly on the bar, and the button does not say sent");
+  btn(w, "p:Drive").onclick(); ok(!kids(w).some((c) => c.className === "err"), "the next try clears what was said"); done.res({}); await soon();
+  // the mark that the view is moving is the Boxes button's, and is left alone
+  { const lb = w._liveRoot.querySelector(".lbox"); const lt = Object.assign(new ctx.LiveTracks(), { els: new Map() }); lt.setView("moving"); w._ltPan(lt);
+    btn(w, "p:Gate").onclick(); done.res({}); await soon(); w._ptzSync();
+    ok(lb.hasAttribute("data-view") && has(btn(w, "p:Gate"), "sent"), "with the view moving: 'camera moving' stays beside Boxes while the bar says sent (neither touches the other)");
+    lt.setView("steady"); w._ltPan(lt); ok(!lb.hasAttribute("data-view") && bar(w).hidden === false, "and it goes when the view rests, the bar as it was"); await tick(); }
+  // a patrol
+  btn(w, "r:Round").onclick(); ok(w.sent.at(-1).type === "protect_detections/ptz/patrol" && w.sent.at(-1).option === "Round" && w.sent.at(-1).entity === "camera.m", "a patrol button asks for that patrol");
+  await soon(); ok(has(btn(w, "r:Round"), "sent") && !has(btn(w, "r:Round"), "on"), "sent; which patrol runs is Home Assistant's to say"); await tick();
+  w.hass = { ...w.h, states: { "select.m_patrol": { state: "Round", attributes: { options: ["stop", "Round", "Night", "Dusk"] } } } };
+  ok(has(btn(w, "r:Round"), "on") && !has(btn(w, "r:Night"), "on") && texts(w).join("|").endsWith("Round|Night|Dusk|Stop"), "Home Assistant says it runs: that patrol is lit, and the list is the entity's own");
+  const before = btn(w, "r:Round"); w.hass = { ...w._hass }; ok(btn(w, "r:Round") === before, "(other news from Home Assistant leaves the bar alone)");
+  btn(w, "r:stop").onclick(); ok(w.sent.at(-1).option === "stop", "Stop stops it"); await soon(); await tick();
+  w.hass = { ...w.h, states: { "select.m_patrol": { state: "stop", attributes: { options: ["stop", "Round", "Night", "Dusk"] } } } };
+  ok(!kids(w).some((c) => has(c, "on")), "stopped: no patrol is lit");
+  w.hass = { ...w.h, states: { "select.m_patrol": { state: "unavailable", attributes: {} } } };
+  ok(texts(w).join("|").endsWith("Patrol|not available just now") && !btn(w, "r:stop"), "the patrol entity not available: said, no dead buttons");
+  // another camera, and closing
+  w._stepLive(1); await tick();
+  ok(w.asked.join() === "camera.m,camera.f" && chip(w).hidden === true && bar(w).hidden === true && kids(w).length === 0, "a camera that does not move: no chip, no bar, nothing changed for it");
+  w._stepLive(1); await tick(); ok(chip(w).hidden === false && bar(w).hidden === false && w.asked.join() === "camera.m,camera.f,camera.m", "back on the one that moves: the bar again (its presets asked afresh)");
+  w._stepLive(1); await tick(); ok(w.asked.length === 3, "(one that does not move is not asked about twice)");
+  w._stepLive(1); await tick(); const n = w.sent.length; w._closeLive();
+  ok(bar(w).hidden === true && kids(w).length === 0 && w.sent.length === n, "closing the dialog takes the bar away and sends nothing"); w.disconnectedCallback();
+  // an answer that comes after the dialog moved on
+  { let res; const w2 = await mkP({ send: () => new Promise((r) => { res = r; }) }); w2._openLive(0); await tick(); btn(w2, "p:Gate").onclick(); w2._stepLive(1); await tick(); res({}); await soon(); w2._stepLive(1); await tick();
+    ok(!kids(w2).some((c) => has(c, "sent")) && kids(w2).filter((c) => c.dataset.key).every((c) => !c.disabled), "an answer for a camera no longer on screen marks nothing on the next"); w2._closeLive(); w2.disconnectedCallback(); }
+  // not an administrator
+  for (const admin of [false, null]) { const u = await mkP({ admin }); u._openLive(0); await tick();
+    ok(u.asked.length === 0 && chip(u).hidden === true && bar(u).hidden === true && kids(u).length === 0, admin === false ? "not an administrator: no chip, no bar, and the backend is not even asked" : "(nor when who the user is cannot be told)"); u._closeLive(); u.disconnectedCallback(); }
+  // the backend refusing (it decides, whatever the page thinks)
+  { const u = await mkP({ infoErr: { code: "unauthorized", message: "no" } }); u._openLive(0); await tick(); u._stepLive(1); await tick(); u._stepLive(1); await tick();
+    ok(chip(u).hidden === true && u.asked.length === 1, "the backend says not an administrator: no controls, and not asked again"); u._closeLive(); u.disconnectedCallback(); }
+  { const u = await mkP({ send: () => Promise.reject({ code: "unauthorized", message: "x" }) }); u._openLive(0); await tick(); btn(u, "p:Home").onclick(); await soon();
+    ok(texts(u).at(-1) === "Only an administrator can move a camera", "a command the backend refuses is said as that"); u._closeLive(); u.disconnectedCallback(); }
+  // a backend without it (Home Assistant not restarted since the update)
+  { const u = await mkP({ infoErr: { code: "unknown_command" } }); u._openLive(0); await tick(); u._stepLive(1); await tick();
+    ok(chip(u).hidden === true && u.asked.length === 1 && u._ptzNone === true, "a backend without the PTZ commands: no chip, asked once, the dialog as before"); u._closeLive(); u.disconnectedCallback(); }
+  { const u = await mkP({ infoErr: { code: "not_found" } }); u._openLive(0); await tick(); ok(chip(u).hidden === true && !u._ptzNone, "a camera the backend does not know: no chip for it"); u._closeLive(); u.disconnectedCallback(); }
+  // presets that cannot be read; no preset service
+  { const u = await mkP({ info: { ...INFO, presets: null, presets_error: "401 Unauthorized" } }); u._openLive(0); await tick();
+    ok(texts(u).slice(0, 2).join("|") === "Home|The presets could not be read: 401 Unauthorized" && kids(u)[1].className === "note" && !!btn(u, "r:Round"), "presets cannot be read: Home alone, with why; the patrols as usual"); u._closeLive(); u.disconnectedCallback(); }
+  { const u = await mkP({ info: { ...INFO, home: false, presets: null, presets_error: "no preset service here (it is too old)", patrol: null } }); u._openLive(0); await tick();
+    ok(texts(u).join("|") === "no preset service here (it is too old)" && !btn(u, "p:Home"), "no preset service: no Home button, why is said"); u._closeLive(); u.disconnectedCallback(); }
+  { const u = await mkP({ info: { ...INFO, presets: [] } }); u._openLive(0); await tick(); ok(texts(u).slice(0, 2).join("|") === "Home|No presets saved in UniFi Protect", "no presets saved: Home, and a quiet note"); u._closeLive(); u.disconnectedCallback(); }
+  // no patrols
+  { const u = await mkP({ info: { ...INFO, patrol: { entity: "select.m_patrol", options: [], running: null, available: true } } }); u._openLive(0); await tick();
+    ok(texts(u).join("|") === "Home|Drive|Gate|Patrol|none set up in UniFi Protect" && !btn(u, "r:stop"), "no patrols defined: a quiet note, no dead control"); u._closeLive(); u.disconnectedCallback(); }
+  { const u = await mkP({ info: { ...INFO, patrol: null } }); u._openLive(0); await tick(); ok(texts(u).join("|") === "Home|Drive|Gate", "no patrol entity at all: nothing about patrols"); u._closeLive(); u.disconnectedCallback(); }
+  { const u = await mkP({ info: { ...INFO, patrol: { ...INFO.patrol, running: "Night" } } }); u._openLive(0); await tick(); ok(has(btn(u, "r:Night"), "on"), "a patrol already running when the dialog opens is lit"); u._closeLive(); u.disconnectedCallback(); }
+  // switched off in the card
+  { const u = await mkP({ cfg: { ptz: false } }); u._openLive(0); await tick(); ok(u.asked.length === 0 && chip(u).hidden === true, "ptz: false: no chip, nothing asked"); u._closeLive(); u.disconnectedCallback(); }
+  // closed bar: remembered, and a closed bar holds no buttons
+  { ctx.localStorage.store = {}; const u = await mkP(); u._openLive(0); await tick(); chip(u).onclick(); chip(u).onclick();
+    ok(bar(u).hidden === true && kids(u).length === 0 && !chip(u).classList.contains("on") && ctx.localStorage.store["camera-wall-card:ptz"] === "0", "the chip closes the bar again"); u._closeLive(); u.disconnectedCallback(); }
+  { const src = fs.readFileSync(FRONTEND + "camera-wall-card.js", "utf8"); const part = src.slice(src.indexOf("presets and patrols\n"), src.indexOf("// ------------------------------------------------- landscape on a phone"));
+    ok(part.length > 2000 && !/callService|unifiprotect\.|select_option/.test(part) && (part.match(/callWS\(/g) || []).length === 2, "the card sends nothing itself: it asks the backend, which checks who is asking");
+    ok(/\.lb\.fill \.pbar \{[^}]*flex-wrap: nowrap; overflow-x: auto/.test(src), "(on a phone the bar is one line that scrolls sideways)"); }
+  ctx.localStorage.store = {};
+}
 console.log(fails ? `${fails} FAILED` : "all passed"); process.exit(fails ? 1 : 0);
