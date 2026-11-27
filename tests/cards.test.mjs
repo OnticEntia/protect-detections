@@ -56,6 +56,7 @@ Object.assign(win, { customCards: [], innerWidth: 1200, innerHeight: 800, scroll
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(FRONTEND + "protect-cameras.js", "utf8").replace(/^export /gm, "") + "\n;Object.assign(globalThis, { findProtectCameras, cameraStatus, camerasStatus });", ctx);
 vm.runInContext(fs.readFileSync(FRONTEND + "protect-live.js", "utf8").replace(/^export /gm, "") + "\n;Object.assign(globalThis, { LiveTracks, LIVE_COLORS, LIVE_DELAY_MS, LIVE_SOURCES, subscribeLive, deepFind, pictureBoxShared: pictureBox });", ctx);
+vm.runInContext(fs.readFileSync(FRONTEND + "protect-video.js", "utf8").replace(/^export /gm, "") + "\n;Object.assign(globalThis, { ProtectFrames, pickType, streamAt, trackKinds });", ctx);
 vm.runInContext("{" + plain(fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8")) + "}", ctx);
 for (const f of [FRONTEND + "protect-detection-card.js", FRONTEND + "camera-wall-card.js"]) vm.runInContext(plain(fs.readFileSync(f, "utf8")) + "\n;globalThis.swipeStep = typeof swipeStep === 'function' ? swipeStep : globalThis.swipeStep; globalThis.todayStr = typeof todayStr === 'function' ? todayStr : globalThis.todayStr;", ctx);
 const Det = defs["protect-detection-card"], Wall = defs["camera-wall-card"]; const Trk = defs["protect-tracking-card"];
@@ -2689,5 +2690,116 @@ ok(w._built && !w._building, "next good config builds after a failure");
     ok(part.length > 2000 && !/callService|unifiprotect\.|select_option/.test(part) && (part.match(/callWS\(/g) || []).length === 2, "the card sends nothing itself: it asks the backend, which checks who is asking");
     ok(/\.lb\.fill \.pbar \{[^}]*flex-wrap: nowrap; overflow-x: auto/.test(src), "(on a phone the bar is one line that scrolls sideways)"); }
   ctx.localStorage.store = {};
+}
+// --- the picture straight from Protect (direct_stream): made-up units, no camera and no picture
+{
+  const u8 = (...parts) => { const flat = parts.flatMap((p) => (typeof p === "string" ? [...p].map((ch) => ch.charCodeAt(0)) : p instanceof Uint8Array ? [...p] : Array.isArray(p) ? p : [p])); return new Uint8Array(flat); };
+  const n32 = (v) => [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+  const n64 = (v) => [...n32(Math.floor(v / 2 ** 32)), ...n32(v >>> 0)];
+  const box = (type, ...body) => { const b = u8(...body); return u8(n32(8 + b.length), type, b); };
+  const unit = (kind, body = new Uint8Array(0)) => u8(kind, [(body.length >> 16) & 255, (body.length >> 8) & 255, body.length & 255], body);
+  const trak = (id, kind) => box("trak", box("tkhd", n32(0), n32(0), n32(0), n32(id), n32(0)), box("mdia", box("mdhd", n32(0), n32(0), n32(0), n32(90000), n32(0)), box("hdlr", n32(0), n32(0), kind, n32(0), n32(0), n32(0))));
+  const init = u8(box("ftyp", "dash", n32(0)), box("moov", box("mvhd", n32(0)), trak(1, "vide"), trak(2, "soun")));
+  const WALL = 1760000000; // (s; a made-up moment)
+  // a fragment: `frames` video frames of the sizes given, some sound, at wall time t (s) and stream clock st (ms)
+  const fragment = (t, st, frames, sounds, { key = false, lie = 0, parts = 3 } = {}) => {
+    const rows = frames.flatMap((f, i) => [...n32(3000), ...n32(f.length), ...n32(i === 0 && key ? 0x02000000 : 0x00010000), ...n32(0)]);
+    const mk = (off1, off2) => box("moof", box("mfhd", n32(0), n32(7)),
+      box("traf", box("tfhd", n32(0x020000), n32(1)), box("tfdt", n32(0x01000000), n64(Math.round(t * 90000))), box("trun", n32(0x000f01), n32(frames.length + lie), n32(off1), rows)),
+      box("traf", box("tfhd", n32(0x020000), n32(2)), box("tfdt", n32(0x01000000), n64(0)), box("trun", n32(0x000201), n32(sounds.length), n32(off2), sounds.flatMap((x) => n32(x.length)))));
+    const size = mk(0, 0).length; const vbytes = frames.reduce((a, f) => a + f.length, 0); const abytes = sounds.reduce((a, f) => a + f.length, 0);
+    const moof = mk(size + 8, size + 8 + vbytes);
+    const cut = Math.floor(moof.length / parts); const pieces = []; for (let i = 0; i < parts; i++) pieces.push(moof.subarray(i * cut, i === parts - 1 ? moof.length : (i + 1) * cut));
+    // (frames and sound come as they are made, mixed; the header after them)
+    const mixed = []; frames.forEach((f, i) => { mixed.push(unit(0xfc, f)); if (sounds[i]) mixed.push(unit(0xfd, sounds[i])); }); sounds.slice(frames.length).forEach((x) => mixed.push(unit(0xfd, x)));
+    return { bytes: u8(unit(0xf9), ...mixed, ...pieces.map((x) => unit(0xfb, x)), unit(0xf7, u8(n64(st), n64(st + 99))), unit(0xfe, u8(n32(8 + vbytes + abytes), "mdat")), unit(0xff)), whole: u8(moof, n32(8 + vbytes + abytes), "mdat", ...frames, ...sounds) };
+  };
+  const F = (n, fill) => new Uint8Array(n).fill(fill);
+  const f1 = fragment(WALL + 0.25, 5000, [F(700, 1), F(90, 2), F(80, 3), F(70, 4)], [F(50, 9), F(51, 8)], { key: true });
+  const f2 = fragment(WALL + 0.25 + 0.1333, 5133, [F(60, 5), F(61, 6), F(62, 7), F(63, 8)], [F(50, 7), F(52, 6), F(53, 5)]);
+  const all = u8(unit(0xf8, u8("hev1.1.2.L93,mp4a.40.2")), unit(0xfa, init), f1.bytes, f2.bytes);
+  const feedIn = (bytes, step) => { const fr = new ctx.ProtectFrames(); const got = []; for (let at = 0; at < bytes.length; at += step) got.push(...fr.feed(bytes.slice(at, at + step))); return { fr, got }; };
+  const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+  for (const step of [all.length, 1024, 7]) {
+    const { fr, got } = feedIn(all, step);
+    ok(!fr.broken && got.map((g) => g.kind).join() === "codec,init,segment,segment" && got[0].text === "hev1.1.2.L93,mp4a.40.2" && same(got[1].data, init) && got[1].tracks.video === 1 && got[1].tracks.audio === 2, `the socket's units are read (${step === all.length ? "in one go" : "in pieces of " + step}): the codecs, the start of the file, the fragments`);
+    ok(same(got[2].data, f1.whole) && same(got[3].data, f2.whole), "a fragment is put back together: its header, then its frames and its sound where the header says they are");
+    ok(Math.abs(got[2].time - (WALL + 0.25)) < 1e-4 && got[2].stream === 5000 && got[2].frames === 4 && got[2].key === true && got[3].key === false && got[3].stream === 5133, "with its time (the console's wall clock), its place on the positions' clock, and whether it starts on a keyframe");
+  }
+  ok(feedIn(u8(unit(0xfa, init), unit(0xfc, F(10, 1)), unit(0xfb, F(10, 1)), unit(0xff), f2.bytes), 64).got.map((g) => g.kind).join() === "init,segment", "joined in the middle of a fragment: that one is left, the next is whole");
+  ok(/not a unit/.test(feedIn(u8([0x00, 0, 0, 8], box("ftyp")), 64).fr.broken) && /frames are not the ones/.test(feedIn(u8(unit(0xfa, init), fragment(1, 1, [F(5, 1)], [], { lie: 1 }).bytes), 64).fr.broken), "something made another way is said, not guessed at");
+  { const { fr, got } = feedIn(u8(unit(0xfa, init), unit(0xf9), unit(0xfc, F(5, 1)), unit(0xfb, F(20, 0)), unit(0xff), f1.bytes), 64); ok(fr.broken && got.length === 1 && fr.buf.length === 0, "and nothing more is read after that"); }
+  // which codecs the browser takes
+  const MSwith = (...okTypes) => ({ isTypeSupported: (t) => okTypes.some((o) => t.includes(`"${o}`)) });
+  ok(ctx.pickType(MSwith("hvc1.1.2.L93,"), "hev1.1.2.L93,mp4a.40.2") === 'video/mp4; codecs="hvc1.1.2.L93,mp4a.40.2"' && ctx.pickType(MSwith("hev1.1.2.L93.B0"), "hev1.1.2.L93,mp4a.40.2") === 'video/mp4; codecs="hev1.1.2.L93.B0,mp4a.40.2"', "the codecs are said the way this browser takes them");
+  ok(ctx.pickType(MSwith(), "hev1.1.2.L93,mp4a.40.2") === null && ctx.pickType(MSwith("avc1.640028"), "avc1.640028") === 'video/mp4; codecs="avc1.640028"' && ctx.pickType(MSwith("x"), "") === null, "a browser that takes none of them: none (H.264 as it is)");
+  // which moment a frame is
+  const segs = [{ t: 0, stream: 5000 }, { t: 0.1333, stream: 5133 }, { t: 0.2666, stream: null }];
+  ok(ctx.streamAt(segs, 0.0667) === 5000 + 66.7 && Math.abs(ctx.streamAt(segs, 0.2) - 5199.7) < 0.01 && ctx.streamAt(segs, 0.1333) === 5133, "the frame on screen is told on the positions' clock, from the fragment it is in");
+  ok(ctx.streamAt(segs, 0.3) === null && ctx.streamAt(segs, -1) === null && ctx.streamAt([{ t: 0, stream: 5000 }], 3) === null && ctx.streamAt([], 1) === null, "where that cannot be told, it is not made up");
+  // the box timing with such a picture
+  { const lt = new ctx.LiveTracks(); const now = Date.now();
+    lt.message({ arrived: now, clockWall: now - 400, clockStream: 800000, clockStreamRate: 1000, tracks: [{ id: "1", coord: [100, 100, 50, 50], objectType: "person", confidence: 90 }] });
+    const K = now - 400 - 800000; let at = 799500; const fake = { frameStream: () => at, stateObj: { attributes: { channel_id: 1 } }, info: () => "direct picture hev1" };
+    const behind = lt.behind(fake, { delay: 900 });
+    ok(Math.abs(lt.moment(behind) - (at + K + 125)) < 5 && lt.kind === "direct" && lt.sync === "clock" && fake.delay === 900, "a direct picture: the moment on screen is its frame's own, on the positions' clock (their 125 ms lateness added), and it is told how far to hold back");
+    ok(Math.abs(lt.moment(lt.behind(fake, { offset: 50 })) - (at + K + 125 - 50)) < 5, "live_offset still trims it");
+    const said = lt.describe(behind); ok(/direct picture hev1/.test(said) && /by the stream's own clock/.test(said) && /stamp -125 ms/.test(said) && !/webrtc|second stream/.test(said), "live_debug says how it is timed");
+    at = null; const est = lt.behind(fake, { delay: 700 }); ok(est === 1000 && lt.sync === "estimate" && /no frame time yet/.test(lt.describe(est)), "before the first frame is told: an estimate, said as one");
+    const usual = { stateObj: { attributes: { channel_id: 1 } } }; lt.statsAt = 0; lt.behind(usual, {}); ok(lt.kind !== "direct" && lt.stamp === -125, "Home Assistant's stream is timed as before"); }
+  // the element
+  const Direct = defs["protect-direct-stream"]; const st = { entity_id: "camera.m", state: "recording", attributes: { channel_id: 1 } };
+  const mkE = async ({ cams = { "camera.m": "cam1" }, reject = null } = {}) => { const e = new Direct(); const asked = []; const failed = []; e.addEventListener("direct-failed", (ev) => failed.push(ev.detail.reason));
+    e.isConnected = true; e.stateObj = st; e.hass = { callWS: (m) => { asked.push(m); if (reject) return Promise.reject(reject); return Promise.resolve(m.type === "auth/sign_path" ? { path: "/signed" + m.path } : { cameras: cams }); } }; await tick(); return Object.assign(e, { asked, failedWith: failed }); };
+  { const e = await mkE(); ok(e.failedWith.length === 1 && /no Media Source/.test(e.failedWith[0]) && e.asked.length === 0 && e.frameStream() === null, "a browser without Media Source: said at once, nothing asked of the backend"); }
+  const socks = []; class WS { constructor(url) { this.url = url; socks.push(this); } close() { this.closed = true; } }
+  class SB extends Target { constructor() { super(); this.got = []; this.updating = false; } appendBuffer(d) { this.got.push(d); } remove(a, b) { this.removed = [a, b]; } }
+  class MS extends Target { static isTypeSupported(t) { return MS.takes(t); } addSourceBuffer(type) { this.type = type; return (this.sb = new SB()); } }
+  MS.takes = (t) => t.includes('"hvc1.1.2.L93,');
+  ctx.MediaSource = MS; ctx.WebSocket = WS; ctx.location.origin = "http://x";
+  { const e = await mkE({ cams: {} }); ok(/not a camera/.test(e.failedWith[0]) && socks.length === 0, "a camera the backend does not relay: said, no socket opened"); }
+  { const e = await mkE({ reject: { code: "unknown_command", message: "Unknown command." } }); ok(e.failedWith.length === 1 && socks.length === 0, "a backend without it: failed, to be played the usual way"); }
+  { const e = await mkE(); const ws = socks.at(-1); const run = e._run;
+    ok(ws.url === "ws://x/signed/api/protect_detections/video/cam1?channel=1" && e.asked.map((m) => m.type).join() === "protect_detections/live/cameras,auth/sign_path" && e.failedWith.length === 0, "it asks which camera this is, has the path signed, and opens the relay for the entity's own channel");
+    ws.onmessage({ data: '{"ready": true, "channel": 1}' }); ws.onmessage({ data: all.slice(0, all.length - f2.bytes.length).buffer });
+    ok(run.ms instanceof MS && e.video.src === "blob:x" && run.type === 'video/mp4; codecs="hvc1.1.2.L93,mp4a.40.2"', "the start of the file opens a Media Source of the right kind");
+    run.ms.dispatchEvent(new Ev("sourceopen")); const sb = run.sb;
+    ok(sb.got.length === 1 && same(sb.got[0], init) && sb.timestampOffset === undefined, "the browser is handed the start of the file first");
+    sb.dispatchEvent(new Ev("updateend")); ok(sb.got.length === 2 && same(sb.got[1], f1.whole) && Math.abs(sb.timestampOffset + (WALL + 0.25)) < 1e-4, "then the first fragment, its time counted from nought (the console's clock is kept by the element)");
+    ws.onmessage({ data: f2.bytes.buffer }); sb.updating = true; ws.onmessage({ data: fragment(WALL + 0.5166, 5266, [F(9, 1)], []).bytes.buffer }); ok(sb.got.length === 3, "one at a time: nothing is pushed at a browser that is busy");
+    sb.updating = false; sb.dispatchEvent(new Ev("updateend")); ok(sb.got.length === 4, "and what waited goes when it is ready");
+    ok(e.frameStream() === null, "no frame shown yet: no moment told");
+    run.frame = { t: 0.2, at: Date.now() }; ok(Math.abs(e.frameStream() - 5199.7) < 0.2, "the frame on screen, on the positions' clock");
+    run.frame = { t: 0.2, at: Date.now() - 3000 }; ok(e.frameStream() === null, "a frame told long ago is not taken for the one on screen");
+    const v = e.video; v.buffered = { length: 1, start: () => 0, end: () => 5 }; v.currentTime = 0.1; v.paused = false; e.delay = 700; e._tend(run);
+    ok(Math.abs(v.currentTime - 4.45) < 1e-6, "far behind the newest picture: it jumps to the wanted time behind it");
+    v.currentTime = 4.0; e._tend(run); const fast = v.playbackRate; v.currentTime = 4.8; e._tend(run); const slow = v.playbackRate; v.currentTime = 4.45; e._tend(run);
+    ok(fast === 1.08 && slow === 0.92 && v.playbackRate === 1 && run.playing === true, "a little off: it plays a touch faster or slower until it is there");
+    v.buffered = { length: 1, start: () => 0, end: () => 30 }; v.currentTime = 29.5; e._tend(run); ok(sb.removed && sb.removed[0] === 0 && Math.abs(sb.removed[1] - 21.5) < 1e-6, "what has been shown is let go of");
+    ok(/direct picture hev1/.test(e.info()) && /second stream/.test(e.info()), "live_debug is told what is playing");
+    ws.onmessage({ data: '{"error": "This device could not keep up with the picture"}' });
+    ok(e.failedWith.join() === "This device could not keep up with the picture" && ws.closed === true && e._run === null && revoked.includes("blob:x") && e.frameStream() === null, "the relay giving up: said, the socket and the player let go");
+    e.hass = e.hass; await tick(); ok(socks.at(-1) === ws, "and it is not tried again behind the card's back"); }
+  { MS.takes = () => false; const e = await mkE(); const ws = socks.at(-1); ws.onmessage({ data: all.buffer });
+    ok(/cannot play hev1\.1\.2\.L93,mp4a\.40\.2/.test(e.failedWith[0]) && ws.closed, "a browser that cannot play H.265 this way: said by name"); MS.takes = (t) => t.includes('"hvc1.1.2.L93,'); }
+  { const e = await mkE(); const ws = socks.at(-1); ws.onmessage({ data: u8([0x10, 0, 0, 1, 0]).buffer }); ok(/not made as expected/.test(e.failedWith[0]), "a stream made another way (an update of Protect's): said"); }
+  { const e = await mkE(); const ws = socks.at(-1); ws.onclose(); ok(/could not be opened/.test(e.failedWith[0]), "the socket closing before anything played: said"); }
+  { const e = await mkE(); const ws = socks.at(-1); e.isConnected = false; e.disconnectedCallback(); ok(ws.closed && e.failedWith.length === 0 && e._run === null, "taken off the page: closed, without a word"); }
+  // the tracking card
+  { const live = { "camera.m": "cam1" }; const hs = { ...hass, user: { is_admin: true }, entities: { "camera.m": { device_id: "d", platform: "unifiprotect" } }, devices: { d: { name: "M" } }, states: { "camera.m": st },
+      connection: { subscribeMessage: () => Promise.resolve(() => {}) }, callWS: (m) => (m.type.endsWith("/live/cameras") ? Promise.resolve({ cameras: live }) : m.type === "auth/sign_path" ? Promise.resolve({ path: "/signed" + m.path }) : new Promise(() => {})) };
+    const mkT = async (cfg) => { const c = new Trk(); c.setConfig(cfg); c.isConnected = true; c.hass = hs; c.connectedCallback(); await tick(); await tick(); return c; };
+    const shown = (c) => c._root.querySelector(".video").children[0];
+    let c = await mkT({}); let el = c._stream("camera.m"); ok(!(el instanceof Direct) && shown(c) === el, "the tracking card plays Home Assistant's stream unless told otherwise"); c.disconnectedCallback();
+    c = await mkT({ direct_stream: true }); el = c._stream("camera.m"); await tick();
+    ok(el instanceof Direct && shown(c) === el && el.muted === true && el.stateObj === st && socks.at(-1).url.endsWith("/video/cam1?channel=1"), "direct_stream: true: the picture straight from Protect, in the same place");
+    c._active = { stream: el, entity: "camera.m", video: {} }; c._warm = { stream: el, entity: "camera.m" };
+    socks.at(-1).onmessage({ data: '{"error": "Too many live pictures are open through Home Assistant already"}' });
+    const next = shown(c);
+    ok(!(next instanceof Direct) && next !== el && c._active.stream === next && c._warm.stream === next && c._active.video === null && next.stateObj === st && /Too many/.test(c._directFailed), "it cannot be played: Home Assistant's stream takes its place where it stood, for the picture up and the one kept warm");
+    c._active = null; c._warm = null;
+    ok(!(c._stream("camera.m") instanceof Direct), "and is what is used from then on");
+    c.setConfig({ direct_stream: true }); ok(c._directFailed === null && c._stream("camera.m") instanceof Direct, "until the card is set up again"); c.disconnectedCallback(); }
+  delete ctx.MediaSource; delete ctx.WebSocket;
 }
 console.log(fails ? `${fails} FAILED` : "all passed"); process.exit(fails ? 1 : 0);

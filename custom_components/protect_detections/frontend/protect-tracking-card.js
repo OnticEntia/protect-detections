@@ -61,6 +61,9 @@
  *                                           # kind on the move, a pane for each (at most),
  *                                           # each zoomed in on its own; off: one view, on
  *                                           # the subject
+ *   direct_stream: false                    # true: play the picture straight from Protect
+ *                                           # (as its own web page does) instead of Home
+ *                                           # Assistant's stream; falls back by itself
  *   live_debug: false                       # true: write on the picture how the boxes
  *                                           # are being timed
  *   sound: none                             # a sound when it starts following someone:
@@ -174,6 +177,7 @@
 // Shared with the other cards here (served from the same folder).
 import { findProtectCameras, cameraStatus, camerasStatus } from "./protect-cameras.js";
 import { LiveTracks, LIVE_COLORS, LIVE_SOURCES, subscribeLive, deepFind, pictureBox } from "./protect-live.js";
+import "./protect-video.js";
 
 const KINDS = { person: ["Person", "people"], vehicle: ["Vehicle", "vehicles"], animal: ["Animal", "animals"], package: ["Package", "packages"] };
 const STANDBY = ["radar", "pulse", "scanline", "static", "none"]; // how standing by looks
@@ -627,6 +631,7 @@ class ProtectTrackingCard extends HTMLElement {
       throw new Error(`protect-tracking-card: 'sound' is one of none, ${Object.keys(SOUNDS).join(", ")}`);
     }
     this._config = { types: ["person"], linger: 10, snapshot: 60, aspect_ratio: 16 / 9, max_zoom: 4, stream: "auto", ...config };
+    this._directFailed = null; // (direct_stream is tried afresh)
     this._stopAll();
     this._cams = null;
     this._liveCams = undefined;
@@ -1486,13 +1491,37 @@ class ProtectTrackingCard extends HTMLElement {
   }
 
   _stream(entity) {
-    const el = document.createElement("ha-camera-stream");
-    el.controls = false;
-    el.muted = true;
-    el.allowExoPlayer = false;
+    // direct_stream: the picture straight from Protect (protect-video.js), where that can be done
+    const direct = this._config.direct_stream === true && !this._directFailed && !!customElements.get("protect-direct-stream");
+    const el = this._player(direct);
+    if (direct) el.addEventListener("direct-failed", (ev) => this._directGone(el, ev && ev.detail && ev.detail.reason));
     this._root.querySelector(".video").replaceChildren(el);
     this._feed(el, entity);
     return el;
+  }
+
+  _player(direct) {
+    const el = document.createElement(direct ? "protect-direct-stream" : "ha-camera-stream");
+    el.controls = false;
+    el.muted = true;
+    el.allowExoPlayer = false;
+    return el;
+  }
+
+  // The direct picture could not be played: Home Assistant's stream takes
+  // its place where it stood, and is what is used from then on (until the
+  // card is set up again). Why is kept for live_debug.
+  _directGone(el, reason) {
+    this._directFailed = reason || "it failed";
+    const next = this._player(false);
+    for (const holder of [this._active, this._warm]) {
+      if (!holder || holder.stream !== el) continue;
+      holder.stream = next;
+      if (holder === this._active) holder.video = null;
+      this._feed(next, holder.entity);
+    }
+    if (el.parentNode || el.parent) el.replaceWith(next);
+    else el.remove();
   }
 
   // (only a change of state is passed on: Home Assistant renews a camera's
@@ -1790,7 +1819,7 @@ class ProtectTrackingCard extends HTMLElement {
       // live_debug: how the boxes are being timed
       const dbg = root.querySelector(".dbg");
       dbg.hidden = !cfg.live_debug;
-      if (cfg.live_debug) dbg.textContent = lt.describe(behind) + (a.pip && a.pip.px ? ` · face ${Math.round(a.pip.px)} px across in the stream` : "");
+      if (cfg.live_debug) dbg.textContent = lt.describe(behind) + (cfg.direct_stream === true && this._directFailed ? ` · direct picture not used: ${this._directFailed}` : "") + (a.pip && a.pip.px ? ` · face ${Math.round(a.pip.px)} px across in the stream` : "");
     }
     const place = a.place || [0, 0, W, H];
 

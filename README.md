@@ -165,6 +165,7 @@ Watches every camera that recognises things, for people, and follows whoever tur
 | `aspect_ratio` | `1.7778` | Width / height, where the view does not set the height. |
 | `height` | – | A fixed height instead (`300`, `300px`, `40vh`). In a *Sections* view the card can be dragged to any width and height. |
 | `live_delay`, `live_offset`, `live_debug` | `700`, `0`, `false` | As on the camera wall. |
+| `direct_stream` | `false` | `true` (experimental): play the picture straight from Protect, as its own web page does, instead of Home Assistant's stream (see [The direct picture](#the-direct-picture-experimental)). Falls back by itself. |
 
 The visual editor has all of these except `accent`, `snapshot`, `stream`, `max_zoom`, `sound_gap`, `aspect_ratio` and the three `live_…` options.
 
@@ -247,6 +248,18 @@ The boxes on the live picture (the wall's *Boxes*, and everything the tracking c
 - **`live_debug: true`** writes one line on the live picture: how it is being timed, how far behind the picture is, and, after a minute or so of things moving, a check of the timing against the picture itself ("picture check: fits at … ms", which should match the "stamp" figure beside it).
 
 <!-- screenshot: live view with live_debug: true, showing the timing line -->
+
+## The direct picture (experimental)
+
+Protect's own web page does not play the camera's RTSP feed. It opens a websocket per camera that sends fragmented MP4 in pieces, each fragment carrying the console's wall clock and the camera's stream clock, the same stream clock the positions of tracked things carry. With `direct_stream: true` the tracking card plays that instead of Home Assistant's stream:
+
+- **How it gets here:** the integration opens that websocket with the UniFi Protect integration's own login and passes it to the browser through memory. Nothing is written to disk, nothing is logged in separately, and nothing is written to Protect.
+- **How the boxes are placed:** each frame on screen is told on the stream clock itself, so nothing about the player has to be measured. What remains is that Protect's positions are stamped about 125 ms later than the frame they belong to; that was measured against the picture on two cameras and is the same on Home Assistant's stream.
+- **What it needs:** a browser with Media Source Extensions that can play the camera's codec that way. Cameras that send H.265 need a browser that plays H.265 through Media Source. Where it cannot be played, the card says why with `live_debug: true` and plays Home Assistant's stream as before.
+- **What it costs:** one connection to the console per viewer, at the stream's own bitrate through Home Assistant (about 1 Mbit/s for a 720p stream, 5 to 12 for 4K), with no transcoding. At most six at once.
+- **Limits:** only the tracking card (and the wall's tracking tiles); sound is not played; it is not Protect's documented interface, so an update could change it, and the card then plays the usual stream.
+
+To compare, put two tracking cards on the same camera, one with `direct_stream: true`, both with `live_debug: true`.
 
 ## The record of live sightings
 

@@ -46,6 +46,7 @@ const LIVE_HELD_MS = 1500; // ... and when it has come to rest, someone reported
 const LIVE_SOURCE_MS = 2000; // positions count as local while one made locally came this recently
 // By the camera's stream (0: main, others: the lighter ones), measured:
 const LIVE_STAMP_MS = [-125, -125]; // a frame's timestamp, against the clock its positions carry (minus: the positions' is later). Measured on both: about -125 on the main stream, about -113 on the second
+const LIVE_DIRECT_STAMP_MS = -125; // the same, for a picture played straight from Protect (protect-video.js) and told by the stream clock itself: measured on two cameras, by the picture
 const LIVE_WEBRTC_BASE_MS = [0, 0]; // a position's moment to its frame on screen, without any held-back time (the same figures, said for the estimate)
 const LIVE_AHEAD_MS = 300; // positions not here yet: a thing keeps moving as it did for this long, at most
 const RTP_WRAP_MS = 2 ** 32 / 90; // a video RTP timestamp (90 kHz) starts over after this
@@ -666,9 +667,8 @@ export class LiveTracks {
   // round that frame's time are in, each candidate timing is scored by how
   // much of that movement lies inside the boxes it would have drawn. Over a
   // minute or so of traffic the right one stands out.
-  _fitLook(video) {
-    const wall = this.frameWall();
-    if (wall == null || typeof document === "undefined") return;
+  _fitLook(video, wall = this.frameWall()) {
+    if (wall == null || !video || typeof document === "undefined") return;
     const cv = (this._fitCanvas = this._fitCanvas || Object.assign(document.createElement("canvas"), { width: FIT_W, height: FIT_H }));
     const g = cv.getContext("2d", { willReadFrequently: true });
     g.drawImage(video, 0, 0, FIT_W, FIT_H);
@@ -735,7 +735,7 @@ export class LiveTracks {
     if (!(top > 0)) return null;
     const good = FIT_STEPS.filter((_, k) => avg[k] >= top * 0.95);
     // (and how well the timing in use does: the step nearest to it)
-    const stamp = LIVE_STAMP_MS[this.channel] ?? LIVE_STAMP_MS[1];
+    const stamp = this.stamp;
     const now = FIT_STEPS.reduce((b, v, k) => (Math.abs(v - stamp) < Math.abs(FIT_STEPS[b] - stamp) ? k : b), 0);
     return { best: FIT_STEPS[avg.indexOf(top)], from: good[0], to: good[good.length - 1], n: fit.n, top, used: avg[now] };
   }
@@ -748,6 +748,7 @@ export class LiveTracks {
     this.debug = !!debug;
     const want = talking ? 0 : Math.max(0, Math.min(3000, Number.isFinite(delay) ? delay : LIVE_DELAY_MS));
     const now = Date.now();
+    if (stream && typeof stream.frameStream === "function") return this._direct(stream, want, now, Number.isFinite(offset) ? offset : 0);
     if (now - this.statsAt > 1000) {
       this.statsAt = now;
       this.can = LiveTracks.hold(stream, want);
@@ -788,21 +789,53 @@ export class LiveTracks {
     return 300 + trim;
   }
 
+  // A picture played straight from Protect (protect-video.js): each frame
+  // says its own time on the clock the positions carry, so nothing about
+  // the player has to be measured. What is left is what Protect's positions
+  // themselves are late by against the frame (LIVE_DIRECT_STAMP_MS).
+  _direct(stream, want, now, trim) {
+    this.kind = "direct";
+    this.can = true;
+    stream.delay = want;
+    const ch = Number(stream.stateObj && stream.stateObj.attributes && stream.stateObj.attributes.channel_id);
+    this.channel = ch === 0 ? 0 : 1;
+    this.directInfo = typeof stream.info === "function" ? stream.info() : "";
+    const at = stream.frameStream();
+    if (at == null || this.K == null || this.gap == null) {
+      this.sync = "estimate";
+      return want + 300 + trim;
+    }
+    this.sync = "clock";
+    this.lag = this.clock ? this.clock.stream + (now - this.clock.at) - at : null;
+    if (this.debug && at !== this._directAt) {
+      this._directAt = at;
+      try {
+        this._fitLook(deepFind(stream, ["VIDEO"])[0], at + this.K);
+      } catch (e) {}
+    }
+    return now - this.gap + LIVE_TRANSIT_MS - (at + this.K - LIVE_DIRECT_STAMP_MS) + trim;
+  }
+
+  // What a frame's timestamp is taken to be ahead of its positions' clock (ms), as the picture is played now.
+  get stamp() {
+    return this.kind === "direct" ? LIVE_DIRECT_STAMP_MS : LIVE_STAMP_MS[this.channel] ?? LIVE_STAMP_MS[1];
+  }
+
   // The timing in words, for looking into it (the cards' live_debug option).
   describe(behind) {
     const n = (v) => (v == null || !Number.isFinite(v) ? "?" : String(Math.round(v)));
     return [
       this.source ? `boxes: ${this.source === "local" ? "local (Protect Tracker)" : "Protect's"}` : "",
       this.mode ? `tracker mode: ${this.mode}` : "",
-      this.kind || "?",
-      this.channel === 0 ? "main stream" : "second stream",
-      this.sync === "rtp" ? "by frame timestamps" : "by estimate",
+      this.kind === "direct" ? this.directInfo || "direct picture" : this.kind || "?",
+      this.kind === "direct" ? "" : this.channel === 0 ? "main stream" : "second stream",
+      this.sync === "clock" ? "by the stream's own clock" : this.sync === "rtp" ? "by frame timestamps" : "by estimate",
       `picture ${n(behind)} ms behind`,
       this.kind === "webrtc" ? `held ${n(this.jb)} ms${this.can ? "" : " (can't hold)"}` : this.kind === "hls" ? `player says ${n(this.hls)} ms` : "",
-      this.sync === "rtp" ? `frame ${n(this.lag)} ms older than newest positions` : this.frame ? "frame timestamps don't add up" : "no frame timestamps",
-      this.sync === "rtp" ? `stamp ${LIVE_STAMP_MS[this.channel] ?? LIVE_STAMP_MS[1]} ms` : "",
+      this.sync === "rtp" || this.sync === "clock" ? `frame ${n(this.lag)} ms older than newest positions` : this.kind === "direct" ? "no frame time yet" : this.frame ? "frame timestamps don't add up" : "no frame timestamps",
+      this.sync === "rtp" || this.sync === "clock" ? `stamp ${this.stamp} ms` : "",
       this.frame && this.frame.waited != null ? `frame waited ${n(this.frame.waited)} ms` : "",
-      ((r) => (r ? `picture check: fits at ${r.best} ms (${r.from} to ${r.to}; ${r.n} frames; boxes ${Math.round(r.top * 100)}% movement there, ${Math.round(r.used * 100)}% as timed now)` : this.debug && this.sync === "rtp" ? "picture check: waiting for something to move" : ""))(this.fitResult()),
+      ((r) => (r ? `picture check: fits at ${r.best} ms (${r.from} to ${r.to}; ${r.n} frames; boxes ${Math.round(r.top * 100)}% movement there, ${Math.round(r.used * 100)}% as timed now)` : this.debug && (this.sync === "rtp" || this.sync === "clock") ? "picture check: waiting for something to move" : ""))(this.fitResult()),
     ].filter(Boolean).join(" · ");
   }
 
