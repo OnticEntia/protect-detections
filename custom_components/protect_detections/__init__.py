@@ -26,6 +26,10 @@ Frontend access:
              /api/protect_detections/clip/<file>   (signed path)
              /api/protect_detections/talk/<camera id>   (signed path, websocket:
              microphone audio in, out of the camera's speaker; talk.py)
+             /api/protect_detections/video/<camera id>  (signed path, websocket:
+             the camera's picture as Protect's own page gets it; video.py)
+  websocket  protect_detections/live/video_probe   what that picture's stream is made of
+             (administrators; nothing of the picture is kept or returned)
 
 A companion to the UniFi Protect integration: the live stream connection is
 the one shared by the Protect companions (protect_zones/stream.py).
@@ -72,6 +76,7 @@ from .live import LiveTracks
 from .ptz import Ptz, Refused
 from .sightings import SightingRecorder
 from .talk import TalkView, speakers
+from .video import BadRequest, MAX_PROBE_S, VideoView, console_stream, probe, stream_query
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -905,6 +910,47 @@ async def _ptz_answer(hass: HomeAssistant, connection: websocket_api.ActiveConne
     connection.send_result(msg["id"], result)
 
 
+@websocket_api.websocket_command({
+    vol.Required("type"): f"{DOMAIN}/live/video_probe",
+    vol.Required("entity"): str,
+    vol.Optional("channel", default=1): vol.In([0, 1, 2]),
+    vol.Optional("seconds", default=4): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=MAX_PROBE_S)),
+    vol.Optional("options"): dict,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_video_probe(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """What a camera's live picture (video.py) is made of: box kinds, sizes,
+    clocks and codecs over a few seconds, and what Protect says of the
+    camera's channels. For finding out; nothing of the picture is kept."""
+    hub: DetectionHub | None = hass.data.get(DOMAIN)
+    api = hub.api if hub else None
+    cam_id = _camera_of(hub, msg["entity"]) if hub else None
+    if api is None or cam_id is None:
+        connection.send_error(msg["id"], "not_found", "Not a UniFi Protect camera")
+        return
+    try:
+        stream_query(cam_id, msg["channel"], dict(msg.get("options") or {}))
+    except BadRequest as err:
+        connection.send_error(msg["id"], "invalid", str(err))
+        return
+    channels = []
+    cam = api.bootstrap.cameras.get(cam_id)
+    for ch in getattr(cam, "channels", None) or []:
+        channels.append({key: getattr(ch, key, None) for key in ("id", "name", "width", "height", "fps", "bitrate", "is_rtsp_enabled")})
+    source = console_stream(api, cam_id, msg["channel"], dict(msg.get("options") or {}))
+    try:
+        result = await probe(source, msg["seconds"])
+    except Exception as err:  # noqa: BLE001 (the finding is that it failed, and how)
+        result = {"failed": f"{type(err).__name__}: {err}"[:300]}
+    finally:
+        await source.aclose()
+    result["channels"] = channels
+    result["video_codec"] = str(getattr(cam, "video_codec", None))
+    result["now"] = int(time.time() * 1000)
+    connection.send_result(msg["id"], result)
+
+
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/ptz", vol.Required("entity"): str})
 @websocket_api.async_response
 async def ws_ptz(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
@@ -1069,12 +1115,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_api.async_register_command(hass, ws_live_cameras)
         websocket_api.async_register_command(hass, ws_live_subscribe)
         websocket_api.async_register_command(hass, ws_live_seen)
+        websocket_api.async_register_command(hass, ws_video_probe)
         websocket_api.async_register_command(hass, ws_ptz)
         websocket_api.async_register_command(hass, ws_ptz_goto)
         websocket_api.async_register_command(hass, ws_ptz_patrol)
         hass.data[TALK_VIEW] = TalkView()
         hass.http.register_view(hass.data[TALK_VIEW])
         hass.http.register_view(ThumbnailView())
+        hass.http.register_view(VideoView())
         hass.http.register_view(ClipView())
         hass.http.register_view(CardsView())
         hass.data[f"{DOMAIN}_registered"] = True

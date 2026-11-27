@@ -353,6 +353,10 @@ python tests/test_cameras.py
 python tests/test_ptz.py
 ```
 
+```bash
+python tests/test_video.py
+```
+
 `hub.smart_cameras()`, `hub.live.subscribe(camera_id, send)` and `hub.record_live(camera_id, packet)` on `hass.data["protect_detections"]` are used by other integrations and are kept stable; the last test checks them.
 
 ## Licence
