@@ -308,7 +308,7 @@ HACS installs one repository at a time and does not install Protect Zones for yo
 | No sound from the tracking card | A browser plays no sound until the page has been clicked; the speaker mark in the card's corner is highlighted until then. The same mark turns sound off for that browser: click it. A background tab makes no sound. |
 | "This camera is no longer in UniFi Protect" | The camera the card is set to has been removed from Protect. Pick another in the card's editor (on the wall: *Edit this tracker…*, or take the tile off). |
 | A tile or card says "Offline" | Protect still has the camera but it isn't answering. It comes back by itself. |
-| The tracking card didn't react to someone | Ask `protect_detections/live/seen` for that time. A sighting of the right kind means it was reported and the card wasn't listening (it listens only while on screen). A gap means the feed was down. With `source: auto` or `local` and Protect Tracker in use, something only Protect reported does not wake the card. |
+| The tracking card didn't react to someone | Ask `protect_detections/live/seen` for that time. A sighting of the right kind means it was reported and the card wasn't listening (it listens only while on screen). A gap means the feed was down. |
 | The face inset is a blur | The stream is too small for the face. Use `stream: high` on the tracking card. |
 | Clips do not play | The camera must be recording in Protect for the time of the detection. Some browsers cannot play HEVC; the card then asks for an H.264 copy, which takes a little longer. |
 | No talk button | The camera needs a speaker, and the page must be on https (or the talk window is used). |
