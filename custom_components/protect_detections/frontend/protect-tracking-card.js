@@ -44,13 +44,6 @@
  *   live_delay: 700                         # ms the picture is held back so the boxes
  *                                           # line up with it (see protect-live.js)
  *   live_offset: 0                          # ms to place the boxes later (+) / earlier (-)
- *   source: auto                            # whose positions: auto (local first: what the
- *                                           # Protect Tracker integration's own model
- *                                           # sees, at once; its mixed feed while that
- *                                           # isn't there or has gone quiet; Protect's
- *                                           # own with no Protect Tracker) | local (only
- *                                           # the first of those) | protect (only
- *                                           # Protect's own)
  *   box_style: reticle                      # how the followed thing is marked: reticle
  *                                           # (the scanner's own brackets close onto it,
  *                                           # follow it and let it go) | plain (a box)
@@ -81,8 +74,7 @@
  *
  * Whom it follows. The thing that woke it is its subject, and the view
  * stays on that one alone: through its standing still, through short
- * losses, and through its reports going on under another id (Protect's and
- * Protect Tracker's can differ). Things standing still never wake the card,
+ * losses, and through its reports going on under another id. Things standing still never wake the card,
  * never become the subject and never widen the view: a thing counts as
  * moving while Protect said so in the last two seconds. When the subject has
  * gone and something else of a watched kind is moving, the view goes over
@@ -93,7 +85,7 @@
  *
  * Whether a thing moves is judged from its box (protect-live.js), not from
  * what its reports say alone. And a subject is followed by its id only as
- * far as that makes sense: a tracker can hand a passing car's id to a
+ * far as that makes sense: Protect can hand a passing car's id to a
  * parked car it drove past. So where things stand is remembered, and a
  * subject that comes to rest on such a place, or jumps across the picture
  * from one report to the next, counts as lost there and then, not followed.
@@ -106,11 +98,8 @@
  *            it as the picture comes up (with the sound, if one is set)
  *   track    the brackets follow it, a tag on them saying what it is, how
  *            sure, and where (zones). Four corners only: nothing is drawn
- *            between them. Thinner and lighter for a thing only Protect
- *            Tracker has seen so far (its local mode: Protect hasn't
- *            reported it); dimmer when it
- *            stands still; breathing gently on a sure one. A face found on
- *            it is a small bracket set; other moving things of a watched
+ *            between them. Dimmer when it stands still; breathing gently on
+ *            a sure one. Other moving things of a watched
  *            kind are faint brackets in their kind's colour
  *   lost     the brackets stay where it was and pulse while the card waits
  *   hand-over  another thing becomes the subject: the brackets move across
@@ -122,8 +111,7 @@
  * belong at once.
  *
  * The face inset (`face_pip: auto`). While the card follows a person whose
- * face is reported (by Protect Tracker as a track of that person, or by
- * Protect as a face inside the person's box), the face is shown enlarged in
+ * face is reported (by Protect, as a face inside the person's box), the face is shown enlarged in
  * a corner, moving with the picture. It is the playing video itself, cut
  * out onto a canvas each frame, as the panes of a split view are: no second
  * stream. Faces are not found in every frame: between finds the face is
@@ -150,14 +138,6 @@
  * left for a second and a half it is one view again, on that thing. Parked
  * things get no pane, and a small card (under 260 x 150 px) never splits.
  *
- * A camera that pans, tilts and zooms. Protect Tracker tells when the
- * camera's view itself is moving. While it does, the card says "camera
- * moving" and takes nothing from where boxes go: no one new wakes it (and no
- * sound is made), nothing is counted as lost or as gone, and it does not
- * stand by; a person already followed is still followed, by fresh reports
- * only. When the view has come to rest the card starts afresh (where things
- * stood, who the subject was), keeping only a person still held.
- *
  * Standing by, no video is playing: the card listens to where Protect says
  * things are (while it is on screen and the page is in front; not otherwise)
  * and shows a still picture now and then. Tapping it opens the camera.
@@ -176,7 +156,7 @@
 
 // Shared with the other cards here (served from the same folder).
 import { findProtectCameras, cameraStatus, camerasStatus } from "./protect-cameras.js";
-import { LiveTracks, LIVE_COLORS, LIVE_SOURCES, subscribeLive, deepFind, pictureBox } from "./protect-live.js";
+import { LiveTracks, LIVE_COLORS, subscribeLive, deepFind, pictureBox } from "./protect-live.js";
 import "./protect-video.js";
 
 const KINDS = { person: ["Person", "people"], vehicle: ["Vehicle", "vehicles"], animal: ["Animal", "animals"], package: ["Package", "packages"] };
@@ -409,7 +389,6 @@ const STYLE = `
   .boxes { position: absolute; pointer-events: none; }
   .box { position: absolute; box-sizing: border-box; border: calc(2px * var(--k, 1)) solid var(--c, #fff); border-radius: calc(3px * var(--k, 1));
     pointer-events: auto; }
-  .box.part { border-width: calc(1.5px * var(--k, 1)); border-radius: 50% / 45%; pointer-events: none; }
   .box.other { border-style: dashed; border-width: calc(1px * var(--k, 1)); opacity: .6; pointer-events: none; }
   .box.also { border-width: calc(1px * var(--k, 1)); opacity: .75; }
   .box .tag { display: none; }
@@ -424,9 +403,6 @@ const STYLE = `
       linear-gradient(var(--bc), var(--bc)) bottom right / var(--bl) var(--bt) no-repeat, linear-gradient(var(--bc), var(--bc)) bottom right / var(--bt) var(--bl) no-repeat;
     filter: drop-shadow(0 0 calc(3px * var(--k, 1)) color-mix(in srgb, var(--bc) 65%, transparent)); }
   /* (the four corners and nothing between them: a line joining them reads as a second box) */
-  /* seen by the local model only so far (Protect hasn't reported it): thinner, lighter brackets; confirmed: as usual */
-  .bs-reticle .box.seen { --bt: calc(1.5px * var(--k, 1)); }
-  .bs-reticle .box.seen::before { opacity: .65; }
   .bs-reticle .box.still::before { opacity: .55; }
   .bs-reticle .box.main.sure:not(.still):not(.lostb)::before { animation: trk-breathe 2.8s ease-in-out infinite; }
   .bs-reticle .box.main.acq::before { animation: trk-close .38s cubic-bezier(.2,.9,.25,1.1) 1 both; }
@@ -435,8 +411,6 @@ const STYLE = `
   .bs-reticle .box.main.lostb .tag { display: none; }
   .bs-reticle .box.also { opacity: .6; --bt: calc(1.5px * var(--k, 1)); }
   .bs-reticle .box.other { opacity: .4; --bt: calc(1px * var(--k, 1)); border-style: none; }
-  .bs-reticle .box.part { --bc: var(--tracking-accent, var(--primary-color, #e0102a)); --bt: calc(1.5px * var(--k, 1)); --bl: 34%; }
-  .bs-reticle .box.part::before { inset: 0; filter: none; }
   /* the tag: what it is, on the brackets, the same size at any zoom; under the box when there is no room above */
   .bs-reticle .box.main .tag { display: block; position: absolute; left: calc(-3px * var(--k, 1)); bottom: 100%; margin-bottom: calc(7px * var(--k, 1)); white-space: nowrap; pointer-events: none;
     font-size: calc(11px * var(--k, 1)); line-height: 1.35; font-weight: 600; letter-spacing: .02em; color: #fff; padding: calc(1px * var(--k, 1)) calc(6px * var(--k, 1));
@@ -609,7 +583,6 @@ const STYLE = `
     line-height: 16px; background: rgba(0,0,0,.62); color: #fff; white-space: nowrap; }
   .chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c, #e0102a); }
   .chip.live i { animation: pulse 1.2s infinite; }
-  .chip.src, .chip.pan { font-weight: 500; font-size: 11px; padding: 2px 7px; opacity: .75; }
   .chip[hidden] { display: none; } /* (the warning chip showed as an empty pill: display above beat the hidden attribute) */
   .chip.warn { background: color-mix(in srgb, var(--warning-color, #fbbf24) 80%, #000); color: #000; }
   @keyframes pulse { 50% { opacity: .25; } }
@@ -626,7 +599,6 @@ class ProtectTrackingCard extends HTMLElement {
       throw new Error("protect-tracking-card: 'types' must be a list such as [person]");
     }
     if (config.camera != null && typeof config.camera !== "string") throw new Error("protect-tracking-card: 'camera' must be a camera entity");
-    if (config.source != null && !LIVE_SOURCES.includes(config.source)) throw new Error(`protect-tracking-card: 'source' is one of ${LIVE_SOURCES.join(", ")}`);
     if (typeof config.sound === "string" && config.sound !== "none" && !SOUNDS[config.sound]) {
       throw new Error(`protect-tracking-card: 'sound' is one of none, ${Object.keys(SOUNDS).join(", ")}`);
     }
@@ -802,16 +774,14 @@ class ProtectTrackingCard extends HTMLElement {
 
   // ------------------------------------------------------- the face inset
 
-  // The face that goes with a followed person: one reported as theirs, or
-  // (Protect's own) one inside the upper part of their box.
+  // The face that goes with a followed person: one reported inside the
+  // upper part of their box.
   static faceOf(subject, all) {
     if (!subject || subject.t.type !== "person") return null;
-    const sid = String(subject.t.id);
     const [sx, sy, sw, sh] = subject.box;
     return (
-      all.find((n) => n.t.type === "face" && n.of === sid) ||
       all.find((n) => {
-        if (n.t.type !== "face" || n.of != null) return false;
+        if (n.t.type !== "face") return false;
         const [cx, cy] = [n.box[0] + n.box[2] / 2, n.box[1] + n.box[3] / 2];
         return cx >= sx && cx <= sx + sw && cy >= sy && cy <= sy + sh * 0.6;
       }) ||
@@ -1059,7 +1029,6 @@ class ProtectTrackingCard extends HTMLElement {
     this._mark();
     this._tick = setInterval(() => {
       if (!document.hidden && this._onScreen !== false) this._askSeen();
-      this._quietCheck();
       this._idle();
     }, 30000);
     this._sync();
@@ -1085,7 +1054,7 @@ class ProtectTrackingCard extends HTMLElement {
           <div class="zoomer"><div class="video"></div><div class="boxes"></div></div>
           <div class="scan"><div class="grid"></div><div class="sweep"></div><div class="rings"><i></i><i></i><i></i></div><div class="line"></div><div class="blips"></div><div class="reticle"></div></div>
           <div class="idle"><ha-icon icon="mdi:account-eye-outline"></ha-icon><b></b><span></span><small></small><small class="note"></small></div>
-          <div class="top"><span class="chip live"><i></i><span class="cam"></span></span><span class="chip src" hidden></span><span class="chip pan" hidden>camera moving</span><span class="chip warn" hidden></span></div>
+          <div class="top"><span class="chip live"><i></i><span class="cam"></span></span><span class="chip warn" hidden></span></div>
           <div class="info"></div>
           <div class="panes"></div>
           <div class="tether"></div>
@@ -1113,7 +1082,6 @@ class ProtectTrackingCard extends HTMLElement {
       this._markClick();
     });
     this._mark();
-    this._panMark();
     this._idle();
   }
 
@@ -1135,7 +1103,6 @@ class ProtectTrackingCard extends HTMLElement {
     else if (this._state === "removed") text = this._config.embedded ? "This camera is no longer in UniFi Protect" : "This camera is no longer in UniFi Protect. Pick another in the card's editor";
     else if (this._state === "nocams") text = this._config.camera ? "This camera doesn't recognise things" : "No camera here recognises things";
     else if (this._offline()) text = cams.length === 1 ? "Camera offline" : "Cameras offline";
-    else if (this._panning && this._listening !== false && this._cams) text = `Watching for ${this._what()} · camera moving`;
     else if (!this._cams) text = "Looking for cameras…";
     else if (this._listening === false) text = "Paused while out of sight";
     status.textContent = text;
@@ -1286,35 +1253,21 @@ class ProtectTrackingCard extends HTMLElement {
     this._subs = this._subs || new Map();
     for (const cam of cams) {
       if (this._subs.has(cam.id)) continue;
-      const sub = { cam, lt: new LiveTracks(), stop: null, using: null, matchAt: 0 };
+      const sub = { cam, lt: new LiveTracks(), stop: null, matchAt: 0 };
       this._subs.set(cam.id, sub);
       const mine = () => this._subs && this._subs.get(cam.id) === sub;
       sub.stop = subscribeLive(
         this._hass,
         cam.entity,
-        this._config.source,
         (msg) => mine() && this._message(sub, msg),
         (st) => {
           if (!mine()) return;
-          sub.using = st.using;
-          sub.lt.mode = st.mode || null;
-          if (st.using && this._config.source === "local" && st.mode !== "local") {
-            // a Protect Tracker from before its local mode: what its model made, out of its mixed feed
-            this._note = "This Protect Tracker has no local mode yet: going by its model's boxes from the mixed feed";
-            this._srcNote = true;
-          } else if (st.using) {
-            if (this._srcNote) this._note = "";
-            this._srcNote = false;
-          } else if (this._config.source === "local") {
-            // asked for by name: said, and it is looked for again by itself
-            this._note = st.code === "unknown_command" ? "Protect Tracker isn't installed (source: local)" : st.code === "not_ready" ? "Protect Tracker's engine isn't running (source: local)" : "Protect Tracker isn't answering (source: local)";
-            this._srcNote = true;
-          } else if (st.code === "unknown_command") this._state = "norelay";
+          if (st.using) this._note = "";
+          else if (st.code === "unknown_command") this._state = "norelay";
           else if (st.code === "camera_removed") this._gone();
           else this._note = "Couldn't start listening for this camera";
           if (!this._active) this._idle();
-        },
-        { autoLocal: ProtectTrackingCard.autoLocal }
+        }
       );
     }
     if (this._config.warm && !this._warm) {
@@ -1358,17 +1311,6 @@ class ProtectTrackingCard extends HTMLElement {
     frame.classList.toggle("warmlive", live);
   }
 
-  // Protect Tracker's local mode tells every second, even with nothing to
-  // tell: gone quiet, this camera isn't being served, and the card says so.
-  _quietCheck() {
-    const quiet = [...((this._subs && this._subs.values()) || [])].some((sub) => sub.lt.quiet);
-    const was = !!this._quietNote;
-    if (quiet) this._note = "Protect Tracker has gone quiet: this camera isn't being served";
-    else if (was) this._note = "";
-    this._quietNote = quiet;
-    if (quiet !== was && !this._active) this._idle();
-  }
-
   // The camera has gone from Protect (so the integration says): everything
   // for it is stopped, and the card says so until another is picked.
   _gone() {
@@ -1378,73 +1320,23 @@ class ProtectTrackingCard extends HTMLElement {
     this._idle();
   }
 
-  // The camera's view has started to move, or has come to rest (Protect Tracker says).
-  _viewChanged(sub) {
-    sub.view = sub.lt.view;
-    const a = this._active;
-    if (a && a.sub === sub && sub.view === "steady") {
-      // at rest again: what was remembered of the picture before no longer holds
-      a.spots = new Map();
-      a.banned = new Map();
-      a.faceRel = null;
-      const kept = a.subject != null && sub.lt.tracks.has(a.subject);
-      if (!kept) {
-        // (ids are new now: the next thing moving is taken at once, with no "it went and something else is there" wait)
-        a.subject = null;
-        a.subjectBox = null;
-        a.subjectAt = Date.now() - SWITCH_MS;
-      }
-    }
-    this._panMark();
-    if (!this._active) this._idle();
-  }
-
-  // The small "camera moving" mark, while any camera watched is.
-  _panMark() {
-    const root = this._root;
-    if (!root) return;
-    const moving = [...((this._subs && this._subs.values()) || [])].some((sub) => sub.lt.view === "moving");
-    this._panning = moving;
-    root.querySelector(".chip.pan").hidden = !moving;
-  }
-
   _message(sub, msg) {
     if (msg && msg.status === "removed") return this._gone();
-    if (msg && msg.status === "view") {
-      sub.lt.message(msg);
-      if (sub.lt.view !== sub.view) this._viewChanged(sub);
-      return;
-    }
     if (msg && msg.status) {
-      // (Protect Tracker's local mode tells when its engine's connection goes and comes back)
-      const engine = msg.mode === "local" || sub.lt.mode === "local";
-      const say = msg.status === "error" ? "Protect's live tracking can't be reached (trying again)" : msg.status === "disconnected" && engine ? "Protect Tracker's engine is not connected" : "";
-      // (what is said about the source itself, such as a tracker too old for local mode, stays through a "connected")
-      if (say || !this._srcNote) this._note = say;
+      this._note = msg.status === "error" ? "Protect's live tracking can't be reached (trying again)" : "";
       if (!this._active) this._idle();
       return;
     }
     sub.lt.message(msg);
-    if (sub.lt.view !== (sub.view || "steady")) this._viewChanged(sub);
-    if (this._quietNote) this._quietCheck();
-    // (the camera's view is moving: boxes going across the picture are the camera's doing. No one new is
-    // taken up, and no sound is made; someone already followed is kept, in _frame)
-    if (sub.lt.view === "moving") {
-      if (this._active && this._active.sub === sub) sub.matchAt = Date.now();
-      return;
-    }
     const types = this._config.types;
-    // (a face found on someone being followed is part of them, not a thing of its own)
-    const own = (msg.tracks || []).filter((tr) => tr && tr.of == null);
-    // (source: local means what Protect Tracker's own model made, and nothing else)
-    const only = this._config.source === "local";
+    const own = (msg.tracks || []).filter(Boolean);
     // (and something standing still wakes nothing: a parked car, a bike on the porch)
     // (whether it is moving is the positions' own judgement as well as the report's: see protect-live.js)
     const moves = (tr) => {
       const t = sub.lt.tracks.get(tr.id);
       return !!t && sub.lt.latest != null && sub.lt.latest - t.moved <= 400;
     };
-    const hit = own.find((tr) => types.includes(tr.objectType) && !tr.stationary && tr.moving !== false && moves(tr) && (!only || tr.local === true));
+    const hit = own.find((tr) => types.includes(tr.objectType) && !tr.stationary && moves(tr));
     const now = Date.now();
     if (!hit) {
       // (messages can come thirty a second: the dots needn't)
@@ -1673,8 +1565,8 @@ class ProtectTrackingCard extends HTMLElement {
     const lt = a.sub.lt;
     const now = Date.now();
     const behind = lt.behind(a.stream, { delay: cfg.live_delay, offset: cfg.live_offset, debug: !!cfg.live_debug });
-    const all = lt.visible(lt.moment(behind), true, cfg.source === "local");
-    const whole = all.filter((n) => n.of == null);
+    const all = lt.visible(lt.moment(behind), true);
+    const whole = all;
     const mine = whole.filter((n) => cfg.types.includes(n.t.type)); // (standing still counts too)
     const others = cfg.show_others ? whole.filter((n) => !cfg.types.includes(n.t.type) && lt.moment(behind) - n.t.moved <= 5000) : [];
     // --- the subject (see the top of this file)
@@ -1690,7 +1582,7 @@ class ProtectTrackingCard extends HTMLElement {
     a.spots = a.spots || new Map();
     a.banned = a.banned || new Map();
     for (const n of all) {
-      if (n.of != null || n.t.id === a.subject) continue;
+      if (n.t.id === a.subject) continue;
       if (at - n.t.moved > STOOD_MS && at - n.t.first > STOOD_MS) a.spots.set(n.t.id, { box: n.box, type: n.t.type, at: now });
     }
     for (const [id, spot] of a.spots) if (now - spot.at > SPOT_KEEP_MS) a.spots.delete(id);
@@ -1701,13 +1593,8 @@ class ProtectTrackingCard extends HTMLElement {
       return w > 0 && h > 0 ? (w * h) / (p[2] * p[3] + q[2] * q[3] - w * h) : 0;
     };
     const lingerMs = Math.max(1, Number(cfg.linger) || 10) * 1000;
-    const panning = lt.view === "moving";
     let subject = mine.find((n) => n.t.id === a.subject) || null;
-    if (panning) {
-      // nothing is made of where boxes are while the camera moves: not lost, not gone, not another's turn
-      a.subjectAt = now;
-      a.seen = now;
-    } else if (subject) {
+    if (subject) {
       const t = subject.t;
       const still = at - Math.max(t.went, t.first); // how long its box hasn't moved
       let lost = false;
@@ -1732,7 +1619,7 @@ class ProtectTrackingCard extends HTMLElement {
         }
       }
     }
-    if (!subject && !panning) {
+    if (!subject) {
       const tr = a.subject == null ? null : lt.tracks.get(a.subject);
       const early = !!tr && tr.pts.length > 0 && tr.pts[0][0] > at; // (reported, but that moment isn't on screen yet)
       if (!early) {
@@ -1755,26 +1642,21 @@ class ProtectTrackingCard extends HTMLElement {
     if (subject || mine.some((n) => moving(n) && !a.banned.has(n.t.id))) a.seen = now;
     // boxed: the subject, and whatever else of a watched kind is on the move (parked things are not)
     const shown = mine.filter((n) => n === subject || (moving(n) && !a.banned.has(n.t.id)));
-    // faces found on those drawn: boxed with them, never followed or counted by themselves
-    const drawn = new Set([...shown, ...others].map((n) => String(n.t.id)));
-    let parts = all.filter((n) => n.of != null && drawn.has(n.of));
     // The followed person's face. Faces are not found in every frame, and a
     // box that waits where the face was last found falls behind someone who
     // walks. So between finds (for up to two seconds) the face is taken to
-    // be where it was on the person, and goes along with them: its brackets
-    // on the picture, and the inset.
+    // be where it was on the person, and goes along with them in the inset.
     const fnode = ProtectTrackingCard.faceOf(subject, all);
     const fresh = !!fnode && at - fnode.t.pts[fnode.t.pts.length - 1][0] <= 150;
     if (fresh) {
       const [sx0, sy0, sw0, sh0] = subject.box.map((v, k) => (k > 1 ? Math.max(1, v) : v));
-      a.faceRel = { t: fnode.t, tied: fnode.of != null, sid: subject.t.id, at: now, r: [(fnode.box[0] - sx0) / sw0, (fnode.box[1] - sy0) / sh0, fnode.box[2] / sw0, fnode.box[3] / sh0] };
+      a.faceRel = { sid: subject.t.id, at: now, r: [(fnode.box[0] - sx0) / sw0, (fnode.box[1] - sy0) / sh0, fnode.box[2] / sw0, fnode.box[3] / sh0] };
     }
     let faceBox = fresh ? fnode.box : null;
     if (!fresh && subject && a.faceRel && a.faceRel.sid === subject.t.id && now - a.faceRel.at < PIP_HOLD_MS) {
       const [sx0, sy0, sw0, sh0] = subject.box;
       const r = a.faceRel.r;
       faceBox = [sx0 + r[0] * sw0, sy0 + r[1] * sh0, r[2] * sw0, r[3] * sh0];
-      if (a.faceRel.tied) parts = [...parts.filter((n) => n.t.id !== a.faceRel.t.id), { t: a.faceRel.t, of: String(subject.t.id), box: faceBox, carried: true }];
     }
 
     // gone for good: back to standing by (a new report keeps it going)
@@ -1808,14 +1690,6 @@ class ProtectTrackingCard extends HTMLElement {
       const failed = !a.playing && now - a.since > FAIL_MS;
       warn.hidden = !failed;
       if (failed) warn.textContent = "The live picture didn't start";
-      // whose positions these are, when there is a choice
-      const src = root.querySelector(".chip.src");
-      const by = lt.source || (a.sub.using === "tracker" ? "local" : "protect");
-      src.hidden = !(a.sub.using === "tracker" || cfg.source);
-      if (!src.hidden) {
-        src.textContent = by === "local" ? "local" : "Protect";
-        src.title = by === "local" ? "Positions from Protect Tracker, frame by frame" : a.sub.using === "tracker" ? "Positions from Protect, passed on by Protect Tracker" : "Positions from Protect";
-      }
       // live_debug: how the boxes are being timed
       const dbg = root.querySelector(".dbg");
       dbg.hidden = !cfg.live_debug;
@@ -1853,17 +1727,14 @@ class ProtectTrackingCard extends HTMLElement {
       a.mainEl.className = "box main lostb";
     }
     this._phase = subject ? (!a.calm && now - a.since < LOCK_MS ? "acquire" : "track") : a.mainEl || a.dropped ? "lost" : this._phase;
-    for (const n of [...shown, ...others, ...parts]) {
+    for (const n of [...shown, ...others]) {
       const { t, box } = n;
       keep.add(t.id);
       let el = a.els.get(t.id);
       if (n === subject) {
         const sure = Number(t.confidence) >= 80;
         const still = at - t.moved > MOVING_MS;
-        const passed = a.sub.using === "tracker" && !t.local;
-        // (Protect Tracker's local mode: seen by its model only so far, or reported by Protect too)
-        const seen = t.confirmed === false;
-        el.className = `box main${sure ? " sure" : ""}${still ? " still" : ""}${passed ? " passed" : ""}${seen ? " seen" : ""}${now < (a.hopUntil || 0) ? " hop" : ""}${now < (a.acqUntil || 0) ? " acq" : ""}`;
+        el.className = `box main${sure ? " sure" : ""}${still ? " still" : ""}${now < (a.hopUntil || 0) ? " hop" : ""}${now < (a.acqUntil || 0) ? " acq" : ""}`;
         el.style.cssText = `left:${(box[0] / 10).toFixed(2)}%;top:${(box[1] / 10).toFixed(2)}%;width:${(box[2] / 10).toFixed(2)}%;height:${(box[3] / 10).toFixed(2)}%;--c:${LIVE_COLORS[t.type] || "#e5e7eb"}`;
         // its tag: what it is, how sure, where
         const names = (this._zones && this._zones[a.sub.cam.id]) || {};
@@ -1888,8 +1759,8 @@ class ProtectTrackingCard extends HTMLElement {
         layer.appendChild(el);
         a.els.set(t.id, el);
       }
-      const other = n.of == null && !cfg.types.includes(t.type);
-      el.className = `box${other ? " other" : ""}${n.of != null ? " part" : ""}${!other && n.of == null && n !== subject ? " also" : ""}`;
+      const other = !cfg.types.includes(t.type);
+      el.className = `box${other ? " other" : ""}${!other && n !== subject ? " also" : ""}`;
       el.style.cssText = `left:${(box[0] / 10).toFixed(2)}%;top:${(box[1] / 10).toFixed(2)}%;width:${(box[2] / 10).toFixed(2)}%;height:${(box[3] / 10).toFixed(2)}%;--c:${LIVE_COLORS[t.type] || "#e5e7eb"}`;
     }
     for (const [id, el] of a.els) {
@@ -1993,7 +1864,7 @@ class ProtectTrackingCard extends HTMLElement {
 // a sound on every click on it, the one already picked included.
 
 // What the card does where the config says nothing (as setConfig has it).
-const EDIT_DEFAULTS = { source: "auto", static_grain: 2, face_pip: "auto", box_style: "reticle", types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, split: "off", sound: "none", sound_volume: 0.5 };
+const EDIT_DEFAULTS = { static_grain: 2, face_pip: "auto", box_style: "reticle", types: ["person"], standby: "radar", linger: 10, show_others: false, warm: false, split: "off", sound: "none", sound_volume: 0.5 };
 const EDIT_FORM = [
   { name: "camera", selector: { entity: { domain: "camera", integration: "unifiprotect" } } },
   { name: "name", selector: { text: {} } },
@@ -2004,18 +1875,13 @@ const EDIT_FORM = [
   { name: "show_others", selector: { boolean: {} } },
   { name: "warm", selector: { boolean: {} } },
   { name: "box_style", selector: { select: { options: [{ value: "reticle", label: "Reticle: the scanner's brackets close onto it" }, { value: "plain", label: "Plain box" }] } } },
-  { name: "source", selector: { select: { options: [
-    { value: "auto", label: "Auto: Protect Tracker's own sightings first; its mixed feed, or UniFi Protect's, when those aren't there" },
-    { value: "local", label: "Local: only Protect Tracker's own sightings" },
-    { value: "protect", label: "UniFi: only UniFi Protect's own" },
-  ] } } },
   { name: "face_pip", selector: { select: { options: [{ value: "auto", label: "Shown while a followed person's face is reported" }, { value: "off", label: "Off" }] } } },
   { name: "split", selector: { select: { options: [{ value: "off", label: "One view, on the subject" }, { value: "2", label: "Up to 2 panes" }, { value: "3", label: "Up to 3 panes" }, { value: "4", label: "Up to 4 panes" }] } } },
   { name: "height", selector: { text: {} } },
 ];
 const EDIT_LABELS = { camera: "Camera (empty: every camera that recognises things)", name: "Name (empty: the camera's)", types: "Watch for", standby: "Standing-by look",
   linger: "Stay after last seen", show_others: "Also box other things", warm: "Live picture while standing by (keeps the stream running)", height: "Height, e.g. 300px (empty: by shape)",
-  split: "Several things moving at once", source: "Whose sightings it goes by (with Auto and Local, something only UniFi Protect reports doesn't wake it)", static_grain: "Static: size of a speck", box_style: "How the followed thing is marked", face_pip: "Face inset (the face enlarged in a corner)" };
+  split: "Several things moving at once", static_grain: "Static: size of a speck", box_style: "How the followed thing is marked", face_pip: "Face inset (the face enlarged in a corner)" };
 const EDIT_STYLE = `
   :host { display: block; }
   .sound { margin-top: 20px; }
@@ -2233,14 +2099,6 @@ if (!customElements.get("protect-tracking-card-editor")) customElements.define("
 
 // (the camera wall brings this file in too, for its tracking tiles: whichever
 // comes first defines the card)
-// `source: auto` is local first: Protect Tracker's local mode, in which its
-// own model's sightings come at once and Protect's details are added in
-// flight; its ordinary mode while that isn't there or has gone quiet; and
-// Protect's own positions with no Protect Tracker. (false: its ordinary
-// mode, in which a thing is told of only once Protect has reported it.)
-// The price of local first: what Protect reports and the model never sees
-// doesn't wake the card.
-ProtectTrackingCard.autoLocal = true;
 ProtectTrackingCard.sound = Sound; // (for the tests)
 ProtectTrackingCard.soundVoices = soundVoices;
 ProtectTrackingCard.editDefaults = EDIT_DEFAULTS;

@@ -122,12 +122,6 @@
  *                                           # camera that moves (administrators only)
  *   live_delay: 700                         # optional: ms the picture is held back
  *                                           # while Boxes is on (WebRTC)
- *   source: auto                            # optional: whose positions the boxes are:
- *                                           # auto (the Protect Tracker integration's when
- *                                           # installed, else Protect's own) | local (only
- *                                           # what its model made) | protect (only Protect's).
- *                                           # In the live view a chip beside Boxes switches
- *                                           # between them (kept in the browser)
  *   live_offset: 0                          # optional: ms to draw the boxes later (+)
  *                                           # or earlier (-), if they don't sit right
  *   phone_landscape: false                  # optional: on a phone, don't turn the
@@ -163,9 +157,6 @@ const PTZ_ERRORS = {
   unknown_command: "Home Assistant has to be restarted before cameras can be moved from here",
   unauthorized: "Only an administrator can move a camera",
 };
-const LIVE_SOURCE_KEY = "camera-wall-card:live-source"; // whose boxes, as picked in the live view
-const LIVE_TRACKER_KEY = "camera-wall-card:live-tracker"; // Protect Tracker has been seen from this browser
-const LIVE_SOURCE_NAMES = { auto: "Auto", local: "Local", protect: "UniFi" };
 const ZOOM_MAX = 8;
 const SVG_NS = "http://www.w3.org/2000/svg";
 // zone colours when Protect gives none
@@ -361,19 +352,12 @@ const LIVE_STYLE = `
   .frame .zoom { position: absolute; inset: 0; transform-origin: 0 0; }
   .frame.zoomed { cursor: grab; touch-action: none; }
   /* what the camera is tracking, live */
-  .lbox[data-view]::after { content: " · camera moving"; font-weight: 400; opacity: .75; }
-  .lbox-it.passed { border-style: dashed; }
-  .lbox-it.seen { border-style: dotted; }
-  button.chip.lsrc { padding-left: 10px; padding-right: 10px; opacity: .85; }
-  button.chip.lsrc.warn { color: var(--warning-color, #fbbf24); }
   .lboxes { position: absolute; pointer-events: none; }
   .ldebug { position: absolute; left: 8px; bottom: 8px; max-width: calc(100% - 16px); padding: 3px 7px; border-radius: 4px; background: rgba(0,0,0,.7); color: #fff;
     font: 11px/1.4 ui-monospace, monospace; pointer-events: none; z-index: 3; }
   .ldebug[hidden] { display: none; }
   .lbox-it { position: absolute; box-sizing: border-box; border: calc(2px * var(--k, 1)) solid var(--c, #fff); border-radius: calc(3px * var(--k, 1));
     pointer-events: none; }
-  .lbox-it.part { border-width: calc(1.5px * var(--k, 1)); border-radius: 50% / 45%; }
-  .lbox-it.part span { display: none; }
   .lbox-it span { position: absolute; left: 0; bottom: 100%; margin-bottom: 3px; white-space: nowrap; font-size: 12px; font-weight: 600; color: #fff;
     padding: 2px 6px; border-radius: 4px; background: color-mix(in srgb, var(--c, #fff) 70%, #000 30%); transform: scale(var(--k, 1)); transform-origin: 0 100%; }
   .lbox-it span.below { bottom: auto; top: 100%; margin: 3px 0 0; transform-origin: 0 0; }
@@ -2102,7 +2086,6 @@ class CameraWallCard extends HTMLElement {
           <button class="chip zbtn" hidden title="Show this camera's zones over the picture"><ha-icon icon="mdi:vector-polygon"></ha-icon>Zones</button>
           <button class="chip pbtn" hidden title="This camera's presets and patrols"><ha-icon icon="mdi:axis-arrow"></ha-icon>PTZ</button>
           <button class="chip lbox" hidden title="Box what the camera is tracking (the picture is held back a little so they line up)"><ha-icon icon="mdi:vector-square"></ha-icon>Boxes</button>
-          <button class="chip lsrc" hidden></button>
           <button class="chip hd" title="Full-quality feed (slower through the public address)"><ha-icon icon="mdi:high-definition"></ha-icon>HD</button>
           <button class="chip zoomx" hidden title="Zoomed in: click for the whole picture"><ha-icon icon="mdi:magnify-minus-outline"></ha-icon><span></span></button>
           <button class="icon expand" title="Bigger"><ha-icon icon="mdi:arrow-expand"></ha-icon></button>
@@ -2143,7 +2126,6 @@ class CameraWallCard extends HTMLElement {
     root.querySelector(".zbtn").onclick = () => this._zEdit || this._zonesToggle();
     root.querySelector(".lbox").onclick = () => this._ltToggle();
     root.querySelector(".pbtn").onclick = () => this._ptzToggle();
-    root.querySelector(".lsrc").onclick = () => this._ltNextSource();
     // Zone menu: right-click on the picture, or a long press on a touch
     // screen. Anywhere else the browser's own menu is left alone.
     const frame = root.querySelector(".frame");
@@ -2295,9 +2277,8 @@ class CameraWallCard extends HTMLElement {
   // there (…/ptz/goto, …/ptz/patrol), which it does through the UniFi
   // Protect integration's own service and patrol entity, and refuses to
   // anyone who is not an administrator. The button says when it was sent;
-  // a failure is said on the bar. That the view is then moving is said
-  // where it always is (beside Boxes, from Protect Tracker): nothing here
-  // claims to know where the camera is.
+  // a failure is said on the bar. Nothing here claims to know where the
+  // camera is.
 
   // The camera on screen, when its presets may be offered to this user.
   _ptzCam() {
@@ -2590,27 +2571,6 @@ class CameraWallCard extends HTMLElement {
     }
   }
 
-  // Whose boxes the live view shows: as picked there (kept in this browser),
-  // else the card's `source`, else auto.
-  _ltSource() {
-    let own = null;
-    try {
-      own = localStorage.getItem(LIVE_SOURCE_KEY);
-    } catch (e) {}
-    const cfg = this._config.source;
-    return LIVE_SOURCE_NAMES[own] ? own : LIVE_SOURCE_NAMES[cfg] ? cfg : "auto";
-  }
-
-  // The chip beside Boxes: the next of Auto, Local, UniFi.
-  _ltNextSource() {
-    const all = Object.keys(LIVE_SOURCE_NAMES);
-    const next = all[(all.indexOf(this._ltSource()) + 1) % all.length];
-    try {
-      localStorage.setItem(LIVE_SOURCE_KEY, next);
-    } catch (e) {}
-    this._ltSync();
-  }
-
   _ltToggle() {
     try {
       localStorage.setItem(LIVE_BOXES_KEY, this._ltPref(LIVE_BOXES_KEY) ? "0" : "1");
@@ -2702,8 +2662,7 @@ class CameraWallCard extends HTMLElement {
   // user chose for this one from its menu.
   _trackConfig(x) {
     const own = (this._arr && this._arr.opts && this._arr.opts[x.key]) || {};
-    // (the wall's `source` goes for its tracking tiles too, unless one says otherwise)
-    return { ...(this._config.source ? { source: this._config.source } : {}), ...x.base, ...own };
+    return { ...x.base, ...own };
   }
 
   // What every tile is known by when arranged: the cameras', then the
@@ -3251,30 +3210,16 @@ class CameraWallCard extends HTMLElement {
     bBtn.classList.toggle("on", boxes);
     if (!boxes) return this._ltStop();
     const entity = this._ltCams[cam.entity] ? cam.entity : cam.tap_entity;
-    const src = this._ltSource();
     let lt = this._lt;
-    if (!lt || lt.entity !== entity || lt.src !== src) {
+    if (!lt || lt.entity !== entity) {
       this._ltStop();
-      lt = this._lt = Object.assign(new LiveTracks(), { entity, src, els: new Map(), placeAt: 0, place: null });
-      // (whose positions: see `source` in protect-live.js)
+      lt = this._lt = Object.assign(new LiveTracks(), { entity, els: new Map(), placeAt: 0, place: null });
       lt.stop = subscribeLive(
         this._hass,
         entity,
-        src,
         (msg) => this._lt === lt && this._ltMessage(lt, msg),
         (st) => {
-          if (this._lt !== lt) return;
-          lt.using = st.using;
-          lt.mode = st.mode || null;
-          lt.missing = !st.using;
-          lt.why = st.code || null;
-          if (st.using === "tracker") {
-            try {
-              localStorage.setItem(LIVE_TRACKER_KEY, "1"); // (so the choice is offered from now on)
-            } catch (e) {}
-          }
-          this._ltMark(lt);
-          if (st.using || src === "local") return; // (local, not there: said on the chip; it is looked for again)
+          if (this._lt !== lt || st.using) return;
           if (st.code === "unknown_command") this._ltNone = true;
           if (st.code === "camera_removed") this._ltCams = undefined; // (asked again: it is no longer among them)
           this._ltStop();
@@ -3302,8 +3247,6 @@ class CameraWallCard extends HTMLElement {
     this._lt = null;
     cancelAnimationFrame(lt.raf);
     if (lt.stop) lt.stop();
-    this._ltMark(null);
-    this._ltPan(null);
     this._ltHold(0); // the picture as live as it gets again
     const layer = this._liveRoot && this._liveRoot.querySelector(".lboxes");
     if (layer) {
@@ -3319,72 +3262,8 @@ class CameraWallCard extends HTMLElement {
       this._ltStop();
       return this._ltSync();
     }
-    if (msg && msg.status === "view") {
-      // (the camera's own view starts to move, or comes to rest: protect-live.js has what follows from it)
-      lt.message(msg);
-      return this._ltPan(lt);
-    }
-    if (msg && msg.status) {
-      // (Protect Tracker's local mode says when its engine's connection goes and comes back)
-      if (msg.mode) lt.mode = msg.mode;
-      const down = msg.status === "disconnected" && lt.mode === "local";
-      if (down !== !!lt.down) {
-        lt.down = down;
-        this._ltMark(lt);
-      }
-      return;
-    }
+    if (msg && msg.status) return;
     lt.message(msg);
-    this._ltPan(lt);
-  }
-
-  // The camera's view is moving (a camera that pans, tilts and zooms): said, quietly, on the Boxes button.
-  _ltPan(lt) {
-    const btn = this._liveRoot && this._liveRoot.querySelector(".lbox");
-    if (!btn) return;
-    const moving = !!lt && lt.view === "moving";
-    if (moving === btn.hasAttribute("data-view")) return;
-    if (moving) btn.setAttribute("data-view", "moving");
-    else btn.removeAttribute("data-view");
-  }
-
-  // The chip beside Boxes says whose boxes are shown, and is where that is
-  // picked: Auto (Protect Tracker's where it has them, Protect's otherwise),
-  // Local (only what Protect Tracker's own model made), UniFi (only
-  // Protect's own, nothing from Protect Tracker). It says the choice, not
-  // who made the last packet, so it stays still. It is offered once Protect
-  // Tracker has been seen, or when the card's `source` is set.
-  _ltMark(lt) {
-    const chip = this._liveRoot && this._liveRoot.querySelector(".lsrc");
-    if (!chip) return;
-    let known = false;
-    let picked = null;
-    try {
-      known = localStorage.getItem(LIVE_TRACKER_KEY) === "1";
-      picked = localStorage.getItem(LIVE_SOURCE_KEY);
-    } catch (e) {}
-    const show = !!lt && (known || !!this._config.source || !!LIVE_SOURCE_NAMES[picked] || lt.using === "tracker");
-    chip.hidden = !show;
-    if (!show) return;
-    const src = lt.src;
-    let text = LIVE_SOURCE_NAMES[src];
-    let title = { auto: "Boxes: Protect Tracker's where it has them, UniFi Protect's otherwise (dashed). Click for only the local ones", local: "Boxes: what Protect Tracker's own model sees, whether or not UniFi Protect reports it (dotted until it does). Click for only UniFi Protect's", protect: "Boxes: only UniFi Protect's own. Click for the best of both" }[src];
-    if (src === "local" && lt.missing) {
-      text += lt.why === "not_ready" ? " · engine not running" : lt.why === "unknown_command" ? " · not installed" : " · not answering";
-      title = "Protect Tracker isn't answering, so there are no local boxes. Click for UniFi Protect's";
-    } else if (src === "local" && (lt.down || lt.quiet)) {
-      text += " · engine down";
-      title = "Protect Tracker's engine is not connected, or has gone quiet. Click for UniFi Protect's";
-    } else if (src === "local" && lt.using === "tracker" && lt.mode !== "local") {
-      text += " · older tracker";
-      title = "This Protect Tracker has no local mode yet: these are its model's boxes out of its mixed feed. Click for UniFi Protect's";
-    } else if (src === "local" && lt.idle) {
-      text += " · nothing now";
-      title = "Protect Tracker's model has nothing in view right now (UniFi Protect does). Click for UniFi Protect's";
-    }
-    if (chip.textContent !== text) chip.textContent = text;
-    chip.title = title;
-    chip.classList.toggle("warn", src === "local" && (!!lt.missing || !!lt.idle || !!lt.down || lt.quiet));
   }
 
   static _ltAt(t, at) {
@@ -3409,7 +3288,7 @@ class CameraWallCard extends HTMLElement {
     const behind = this._ltBehind(lt);
     // the camera's moment that is on screen now
     const at = lt.moment(behind);
-    const now = lt.visible(at, false, lt.src === "local"); // (nothing parked: not worth a box)
+    const now = lt.visible(at); // (nothing parked: not worth a box)
     // where the picture is, in the zooming element's own pixels (looked up now and then)
     const stamp = Date.now();
     if (stamp - lt.placeAt > 500) {
@@ -3424,22 +3303,6 @@ class CameraWallCard extends HTMLElement {
         const k = (this._zoom && this._zoom.s) || 1;
         lt.place = [(pic.left - frame.left) / k, (pic.top - frame.top) / k, pic.width / k, pic.height / k];
       } else lt.place = null;
-      // (gone quiet, or back: the chip says so)
-      if (lt.src === "local" && lt.quiet !== !!lt.wasQuiet) {
-        lt.wasQuiet = lt.quiet;
-        this._ltMark(lt);
-      }
-      // Local picked and the model has nothing while Protect does: said on the chip (after a moment, so it doesn't blink)
-      if (lt.src === "local") {
-        const none = lt.using === "tracker" && !now.length && lt.visible(at).length > 0;
-        if (!none) lt.noneSince = 0;
-        else if (!lt.noneSince) lt.noneSince = stamp;
-        const idle = !!lt.noneSince && stamp - lt.noneSince >= 1500;
-        if (idle !== !!lt.idle) {
-          lt.idle = idle;
-          this._ltMark(lt);
-        }
-      }
       // live_debug: how the boxes are being timed, written on the picture
       const dbg = root.querySelector(".ldebug");
       if (dbg) {
@@ -3452,7 +3315,7 @@ class CameraWallCard extends HTMLElement {
     const keep = new Set();
     if (place) {
       layer.style.cssText = `left:${place[0].toFixed(1)}px;top:${place[1].toFixed(1)}px;width:${place[2].toFixed(1)}px;height:${place[3].toFixed(1)}px;--k:${(1 / ((this._zoom && this._zoom.s) || 1)).toFixed(4)}`;
-      for (const { t, box, of } of now) {
+      for (const { t, box } of now) {
         keep.add(t.id);
         let el = lt.els.get(t.id);
         if (!el) {
@@ -3462,13 +3325,7 @@ class CameraWallCard extends HTMLElement {
           layer.appendChild(el);
           lt.els.set(t.id, el);
         }
-        // (a face found on the person it is drawn with needs no name of its own)
-        const label = of != null ? "" : `${t.type.charAt(0).toUpperCase()}${t.type.slice(1)}${t.desc ? ` · ${t.desc}` : ""}`;
-        el.classList.toggle("part", of != null);
-        // (Auto, with Protect Tracker: a box that is Protect's own, passed on, is dashed)
-        el.classList.toggle("passed", lt.using === "tracker" && lt.src !== "protect" && of == null && !t.local);
-        // (local mode: seen by the model only so far; Protect hasn't reported it)
-        el.classList.toggle("seen", t.confirmed === false && of == null);
+        const label = `${t.type.charAt(0).toUpperCase()}${t.type.slice(1)}${t.desc ? ` · ${t.desc}` : ""}`;
         if (el.firstChild.textContent !== label) el.firstChild.textContent = label;
         el.style.cssText = `left:${(box[0] / 10).toFixed(2)}%;top:${(box[1] / 10).toFixed(2)}%;width:${(box[2] / 10).toFixed(2)}%;height:${(box[3] / 10).toFixed(2)}%;--c:${LIVE_COLORS[t.type] || "#e5e7eb"}`;
         el.firstChild.classList.toggle("below", box[1] < 60);
@@ -4522,7 +4379,7 @@ class CameraWallCard extends HTMLElement {
 // shows what the wall does by default, and stays left out until it is
 // changed. The camera lists (`cameras`, a `history` list), `alarm_modes`,
 // `breakpoints` and a tracking tile's options (`tracking: {...}`) are YAML.
-const WALL_DEFAULTS = { history: true, tracking: true, arrange: true, aspect_ratio: 1.7778, live_tracks: true, ptz: true, source: "auto", live_delay: 700, live_offset: 0, live_debug: false, zone_overlay: true, phone_landscape: true };
+const WALL_DEFAULTS = { history: true, tracking: true, arrange: true, aspect_ratio: 1.7778, live_tracks: true, ptz: true, live_delay: 700, live_offset: 0, live_debug: false, zone_overlay: true, phone_landscape: true };
 const WALL_SWITCH_OR_MORE = ["history", "tracking"]; // false, or left out, or more said in YAML
 const WALL_FORM = [
   { name: "exclude", selector: { text: { multiple: true } } },
@@ -4535,7 +4392,6 @@ const WALL_FORM = [
   { name: "aspect_ratio", selector: { number: { min: 0.5, max: 3, step: 0.0001, mode: "box" } } },
   { name: "live_tracks", selector: { boolean: {} } },
   { name: "ptz", selector: { boolean: {} } },
-  { name: "source", selector: { select: { options: [{ value: "auto", label: "Auto: the live view shows the best of both; the tracking tiles go by Protect Tracker's own sightings first" }, { value: "local", label: "Local: only Protect Tracker's own" }, { value: "protect", label: "UniFi: only UniFi Protect's own" }] } } },
   { name: "live_delay", selector: { number: { min: 0, max: 3000, step: 50, mode: "box", unit_of_measurement: "ms" } } },
   { name: "live_offset", selector: { number: { min: -3000, max: 3000, step: 10, mode: "box", unit_of_measurement: "ms" } } },
   { name: "live_debug", selector: { boolean: {} } },
@@ -4546,7 +4402,7 @@ const WALL_FORM = [
 ];
 const WALL_LABELS = { exclude: "Cameras to leave out (names, entity ids or device ids)", order: "Cameras to put first, in this order", alarm: "Alarm panel (empty: the one that is found)",
   history: "History button", tracking: "Tracking tiles", arrange: "Arrange button", layout: "Name of this wall's saved arrangement (empty: default)", aspect_ratio: "Shape of each feed (width / height)",
-  live_tracks: "Boxes button in the live view", ptz: "Presets and patrols of a camera that moves (administrators)", source: "Whose boxes", live_delay: "Live picture held back for the boxes", live_offset: "Draw the boxes later (+) or earlier (−)",
+  live_tracks: "Boxes button in the live view", ptz: "Presets and patrols of a camera that moves (administrators)", live_delay: "Live picture held back for the boxes", live_offset: "Draw the boxes later (+) or earlier (−)",
   live_debug: "Write on the live picture how the boxes are timed", zone_overlay: "Zones in the live view", phone_landscape: "Turn the live view on a phone", local_url: "Local address (empty: Home Assistant's)", remote_url: "Remote address (empty: Home Assistant's)" };
 
 class CameraWallCardEditor extends HTMLElement {

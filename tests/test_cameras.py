@@ -137,25 +137,15 @@ rec.recording = True
 rec._pending = True  # (as if a save were already due: no store here)
 ended = []
 rec._unsubs = {"id1": lambda: ended.append("id1")}
-present = {"id1"}
-rec.known = lambda cid: cid in present
 T = 1_700_000_000_000
-pkt = {"source": "local", "tracks": [{"id": "L1", "coord": [1, 2, 3, 4], "objectType": "person"}]}
-rec.record_live("id1", pkt)
-rec.record_live("id9", pkt)
-ok(set(rec.log.last) == {"id1"}, "a tracker's packet for a camera Protect doesn't have is not recorded; one for a camera it has is")
+rec._feed("id1", {"arrived": T, "tracks": [{"id": "1", "coord": [1, 2, 3, 4], "objectType": "person"}]})
 before = rec.log.dump()["sightings"]
 rec._feed("id1", {"status": "removed"})
 ok(ended == ["id1"] and "id1" not in rec._unsubs, "word from the relay that a camera has been removed: it is no longer listened to")
 snap = rec.log.snapshot()
 ok(len(snap["sightings"]) == len(before) == 1 and snap["gaps"][0]["reason"] == "removed" and snap["cameras"]["id1"]["connected"] is False, "what was on record of it is kept, and the record says from when it was gone")
-present.clear()
-rec.record_live("id1", pkt)
 rec._feed("id1", {"status": "removed"})
 ok(len(rec.log.snapshot()["sightings"]) == 1 and len(rec.log.snapshot()["gaps"]) == 1, "nothing more is written for it afterwards")
-rec.known = None
-rec.record_live("id7", pkt)
-ok("id7" in rec.log.last, "(with no way of telling, as in an older set-up, packets are recorded as before)")
 
 print(f"{fails} FAILED" if fails else "all passed")
 sys.exit(1 if fails else 0)

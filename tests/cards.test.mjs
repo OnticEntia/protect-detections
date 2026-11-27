@@ -55,7 +55,7 @@ const ctx = { window: win, document: { createElement: (t) => (defs[t] ? new defs
 Object.assign(win, { customCards: [], innerWidth: 1200, innerHeight: 800, scrollY: 0 }); ctx.globalThis = ctx;
 vm.createContext(ctx);
 vm.runInContext(fs.readFileSync(FRONTEND + "protect-cameras.js", "utf8").replace(/^export /gm, "") + "\n;Object.assign(globalThis, { findProtectCameras, cameraStatus, camerasStatus });", ctx);
-vm.runInContext(fs.readFileSync(FRONTEND + "protect-live.js", "utf8").replace(/^export /gm, "") + "\n;Object.assign(globalThis, { LiveTracks, LIVE_COLORS, LIVE_DELAY_MS, LIVE_SOURCES, subscribeLive, deepFind, pictureBoxShared: pictureBox });", ctx);
+vm.runInContext(fs.readFileSync(FRONTEND + "protect-live.js", "utf8").replace(/^export /gm, "") + "\n;Object.assign(globalThis, { LiveTracks, LIVE_COLORS, LIVE_DELAY_MS, subscribeLive, deepFind, pictureBoxShared: pictureBox });", ctx);
 vm.runInContext(fs.readFileSync(FRONTEND + "protect-video.js", "utf8").replace(/^export /gm, "") + "\n;Object.assign(globalThis, { ProtectFrames, pickType, streamAt, trackKinds });", ctx);
 vm.runInContext("{" + plain(fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8")) + "}", ctx);
 for (const f of [FRONTEND + "protect-detection-card.js", FRONTEND + "camera-wall-card.js"]) vm.runInContext(plain(fs.readFileSync(f, "utf8")) + "\n;globalThis.swipeStep = typeof swipeStep === 'function' ? swipeStep : globalThis.swipeStep; globalThis.todayStr = typeof todayStr === 'function' ? todayStr : globalThis.todayStr;", ctx);
@@ -859,74 +859,6 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(Math.abs(w._ltBehind(hl) - (4200 + 1500)) < 1 && hl.kind === "hls" && hl.can === false, "HLS: nothing to hold back; the boxes are kept and drawn that much later");
   w._liveIndex = null; w._liveStream = null; w.disconnectedCallback(); ctx.localStorage.store = {};
 }
-// --- the live view: whose boxes (Auto / Local / UniFi)
-{
-  ctx.localStorage.store = {};
-  const TR = "protect_tracker/live/subscribe", PR = "protect_detections/live/subscribe";
-  const mkConn = (have) => { const c = { have: new Set(have), open: new Map(), log: [],
-    subscribeMessage(cb, m) { if (!m.type.endsWith("/live/subscribe")) return Promise.resolve(() => {}); c.log.push(m.type); if (!c.have.has(m.type)) return Promise.reject({ code: "unknown_command" }); c.open.set(m.type, cb); return Promise.resolve(() => { c.open.delete(m.type); }); } }; return c; };
-  const realTimeout = ctx.setTimeout; ctx.setTimeout = (f, ms) => (ms >= 100000 ? { held: true } : realTimeout(f, ms)); // (the looking-again for Protect Tracker isn't wanted here)
-  const mk = async (have, cfg = {}) => { const conn = mkConn(have); const w = new Wall(); w.clientWidth = 1000; w.isConnected = true;
-    w.setConfig({ cameras: [{ entity: "camera.a", name: "A" }], alarm: false, history: false, arrange: false, tracking: false, ...cfg });
-    w.hass = { ...hass, entities: {}, devices: {}, connection: conn, callWS: (m) => (m.type === "network/url" ? Promise.resolve({}) : m.type.endsWith("/live/cameras") ? Promise.resolve({ cameras: { "camera.a": "p1" } }) : new Promise(() => {})) };
-    await tick(); await tick(); await tick(); w._openLive(0); await tick(); await tick();
-    const root = w._liveRoot; const vid = Object.assign(new El(), { tagName: "VIDEO", videoWidth: 1920, videoHeight: 1080, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1600, height: 900 }) });
-    w._liveStream = Object.assign(new El(), { querySelectorAll: () => [vid], isConnected: true });
-    for (const q of [".frame", ".zoom"]) root.querySelector(q).getBoundingClientRect = () => ({ left: 0, top: 0, width: 1600, height: 900 });
-    ctx.localStorage.store["camera-wall-card:live-boxes"] = "1"; w._ltSync(); await tick(); await tick(); w.conn = conn; return w; };
-  const chip = (w) => w._liveRoot.querySelector(".lsrc");
-  // the picture is taken as 300 ms behind ("other player"); packets as the tracker sends them
-  const feed = (w, type, tracks, source, shift = 0) => { const real = Date.now; const now = real() + shift; const n = 12;
-    for (let k = 0; k < n; k++) { const c = now - 2000 + k * 100; Date.now = () => c + (source === "local" ? -20 : 400); w.conn.open.get(type)({ clockWall: c, ...(source ? { source } : {}), tracks: tracks(k) }); }
-    Date.now = () => now - 2000 + 800 + (source === "local" ? -20 : 400); try { w._lt.placeAt = 0; w._ltFrame(w._lt); } finally { Date.now = real; } };
-  const car = (id, x, local) => (k) => [{ id, coord: [x + k * 10, 400, 100, 50], objectType: "vehicle", stationary: false, ...(local ? { local: true } : {}) }];
-  const both = (k) => [...car("m", 100, true)(k), ...car("u", 600, false)(k)];
-  const drawn = (w) => [...w._lt.els].map(([id, el]) => id + (el.classList.contains("passed") ? "(dashed)" : "")).sort().join();
-  // no Protect Tracker: nothing new to see
-  let w = await mk([PR]);
-  ok(w._lt.src === "auto" && w.conn.open.has(PR) && chip(w).hidden === true, "live view without Protect Tracker: Protect's boxes, and no chooser to wonder about");
-  feed(w, PR, car("u", 600, false), null); ok(drawn(w) === "u", "its boxes as before, none dashed");
-  w._closeLive(); w.disconnectedCallback();
-  // with it: the chooser, saying the choice
-  w = await mk([TR, PR]);
-  ok(w._lt.src === "auto" && w.conn.open.has(TR) && !w.conn.open.has(PR) && chip(w).hidden === false && chip(w).textContent === "Auto", "with Protect Tracker: the chip beside Boxes says Auto");
-  feed(w, TR, both, "local"); const textA = chip(w).textContent;
-  w.conn.open.get(TR)({ clockWall: Date.now(), source: "protect", tracks: [] }); w.conn.open.get(TR)({ clockWall: Date.now() + 1, source: "local", tracks: [] });
-  ok(drawn(w) === "m,u(dashed)" && chip(w).textContent === textA && w._liveRoot.querySelector(".lbox").getAttribute("data-src") == null, "Auto: both kinds drawn, Protect's own dashed; the chip and the Boxes button don't change with the packets");
-  // Local: only what the model made
-  chip(w).onclick(); await tick(); await tick();
-  ok(ctx.localStorage.store["camera-wall-card:live-source"] === "local" && w._lt.src === "local" && chip(w).textContent === "Local" && w.conn.open.has(TR), "a click: Local, kept in this browser");
-  feed(w, TR, both, "local"); ok(drawn(w) === "m", "Local: only the model's own boxes; Protect's passed-on ones are not shown");
-  // ... and says so when the model has nothing (in a view opened afresh, so nothing from before is still in view)
-  w._closeLive(); w.disconnectedCallback(); w = await mk([TR, PR]);
-  ok(w._lt.src === "local", "(reopened: still Local)");
-  feed(w, TR, car("u2", 300, false), "protect");
-  ok(drawn(w) === "" && chip(w).textContent === "Local", "the model has nothing, Protect has: no boxes (not said at once: it may be a blink)");
-  feed(w, TR, car("u2", 300, false), "protect", 2500);
-  ok(drawn(w) === "" && chip(w).textContent === "Local · nothing now" && chip(w).classList.contains("warn"), "still nothing a moment later: the chip says so");
-  feed(w, TR, both, "local", 5000); ok(drawn(w) === "m" && chip(w).textContent === "Local" && !chip(w).classList.contains("warn"), "the model has something again: its box, and the chip is plain again");
-  // UniFi: Protect's own command, nothing from the tracker
-  chip(w).onclick(); await tick(); await tick();
-  ok(w._lt.src === "protect" && chip(w).textContent === "UniFi" && w.conn.open.has(PR) && !w.conn.open.has(TR), "another click: UniFi, listening to Protect's own feed only");
-  feed(w, PR, car("u", 600, false), null); ok(drawn(w) === "u", "UniFi: Protect's boxes, drawn plain");
-  chip(w).onclick(); await tick(); await tick(); ok(w._lt.src === "auto" && chip(w).textContent === "Auto" && w.conn.open.has(TR), "and round to Auto again");
-  w._closeLive(); w.disconnectedCallback();
-  // the choice is remembered, and offered even when UniFi was left picked
-  ctx.localStorage.store["camera-wall-card:live-source"] = "protect";
-  w = await mk([TR, PR]); ok(w._lt.src === "protect" && chip(w).hidden === false && chip(w).textContent === "UniFi" && w.conn.log.join() === PR, "next time: what was picked, without asking Protect Tracker; the chip is there to change it"); w._closeLive(); w.disconnectedCallback();
-  // the card's own `source` is where it starts
-  ctx.localStorage.store = {};
-  w = await mk([TR, PR], { source: "local" }); ok(w._lt.src === "local" && chip(w).textContent === "Local", "the card's source option is the starting point"); w._closeLive(); w.disconnectedCallback();
-  w = await mk([PR], { source: "local" }); ok(chip(w).hidden === false && chip(w).textContent === "Local · not installed" && !!w._lt && !w.conn.open.has(PR), "Local without Protect Tracker: said on the chip, and Protect's boxes are not slipped in");
-  chip(w).onclick(); await tick(); await tick(); ok(w._lt.src === "protect" && w.conn.open.has(PR), "one click from there to UniFi"); w._closeLive(); w.disconnectedCallback();
-  // one thing, both makes: the local box is kept to
-  { const m = new ctx.LiveTracks(); const B = 1_700_000_200_000;
-    for (let c = B; c <= B + 1000; c += 100) { m.message({ clockWall: c, source: "local", tracks: [{ id: "v", coord: [100 + c - B, 300, 80, 50], objectType: "vehicle", local: true }] }); m.message({ clockWall: c + 50, source: "protect", tracks: [{ id: "v", coord: [108 + c + 50 - B, 300, 90, 56], objectType: "vehicle" }] }); }
-    const pts = m.tracks.get("v").pts; ok(pts.length === 11 && pts.every((q) => q[3] === 80), "a thing reported by both in turn, Protect's even with the newer stamp: only the local box is used while it is fresh (no hopping between two rectangles)");
-    for (let c = B + 2100; c <= B + 3100; c += 100) m.message({ clockWall: c, source: "protect", tracks: [{ id: "v", coord: [108 + c - B, 300, 90, 56], objectType: "vehicle" }] });
-    ok(m.tracks.get("v").pts.length === 22 && m.tracks.get("v").local === false, "the model has let go of it for a second: Protect's box takes over"); }
-  ctx.setTimeout = realTimeout; ctx.localStorage.store = {};
-}
 // --- the tracking card
 {
   ctx.document.addEventListener ||= () => {}; ctx.document.removeEventListener ||= () => {}; ctx.document.hidden = false; ctx.localStorage.store = {};
@@ -1021,7 +953,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const states = { [P]: { entity_id: P, state: "recording", attributes: { channel_id: 0 } } };
   const mkc = async (cfg) => { let push = null;
     const h = { ...hass, entities: reg, states, devices: { d1: { name: "Front" } },
-      connection: { subscribeMessage: (cb, m) => { if (m.type.startsWith("protect_tracker")) return Promise.reject({ code: "unknown_command" }); push = cb; return Promise.resolve(() => {}); } },
+      connection: { subscribeMessage: (cb, m) => { push = cb; return Promise.resolve(() => {}); } },
       callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { [P]: "p1" } }); if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
     const c = new Trk(); c.setConfig({ linger: 5, ...cfg }); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick();
     Object.assign(c._root.querySelector(".frame"), { clientWidth: 1000, clientHeight: 562 });
@@ -1076,21 +1008,21 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(c._active.subject === "near", "several to choose from: the one nearest to where the subject was");
   c.disconnectedCallback();
 
-  // the subject's reports go on under another id (Protect's box, then the local model's)
+  // the subject's reports go on under another id (Protect gives a thing a new id now and then)
   c = await mkc({ types: ["person"] });
   const walker = (id, t, extra = {}) => ({ id, coord: [200 + t * 0.05, 300, 60, 180], objectType: "person", stationary: false, ...extra });
-  c.run(2000, (t) => [bike, walker("u7", t)], { source: "protect" });
+  c.run(2000, (t) => [bike, walker("u7", t)]);
   const before = c.centre();
-  c.run(500, (t) => [bike, walker("m7", t, { local: true })], { source: "local" });
-  c.run(600, (t) => [bike, walker("m7", t, { local: true })], { source: "local" });
+  c.run(500, (t) => [bike, walker("m7", t)]);
+  c.run(600, (t) => [bike, walker("m7", t)]);
   const after = c.centre();
   ok(c._active.subject === "m7" && Math.abs(after[0] - before[0]) < 90 && after[1] > 1.5, `its reports go on under another id, where it was: taken up at once, the view not let go (centre ${before[0]} -> ${after[0]}, zoom ${after[1]})`);
   // mixed packets, same id from both makes, a parked thing throughout
-  for (let n = 0; n < 40; n++) { c.T += 33; c.send([walker("m7", c.T, { local: true })], { source: "local" }); if (n % 8 === 0) c.send([bike, { ...walker("m7", c.T - 400), coord: [204 + (c.T - 400) * 0.05, 302, 64, 184] }], { source: "protect" }); c.frame(); }
-  ok(c._active.subject === "m7" && ids(c) === "m7", "local and Protect packets mixed, the bike in every one of Protect's: still on the one person");
+  for (let n = 0; n < 40; n++) { c.T += 33; c.send([walker("m7", c.T)]); if (n % 8 === 0) c.send([bike, { ...walker("m7", c.T - 400), coord: [204 + (c.T - 400) * 0.05, 302, 64, 184] }]); c.frame(); }
+  ok(c._active.subject === "m7" && ids(c) === "m7", "packets many a second, the bike in some of them: still on the one person");
   // the person stands still: stays the subject, the card stays up
   const stoodAt = 200 + c.T * 0.05;
-  c.run(8000, () => [bike, { id: "m7", coord: [stoodAt, 300, 60, 180], objectType: "person", stationary: true, local: true }], { source: "local" });
+  c.run(8000, () => [bike, { id: "m7", coord: [stoodAt, 300, 60, 180], objectType: "person", stationary: true }]);
   ok(!!c._active && c._active.subject === "m7" && ids(c) === "m7" && c.centre()[1] > 1.5, "the person stands still for 8 s: still the subject, still zoomed in (a person standing is not a parked thing)");
   c.run(7000, () => [bike]); ok(!c._active, "they have gone: standing by after the linger");
   c.disconnectedCallback();
@@ -1105,8 +1037,8 @@ ok(w._built && !w._building, "next good config builds after a failure");
   // a sender that has the flag wrong: a parked thing said to be moving, twenty times a second
   ctx.LiveTracks.SETTLE_MS = 1500;
   c = await mkc({ types: ["vehicle"] }); c.T0 = Date.now(); // (this card's clock starts when it started listening)
-  const wobbly = (t) => [{ id: "bike", coord: [500 + (t % 100 ? 2 : -2), 600 + (t % 150 ? 1 : -1), 220, 300], objectType: "vehicle", stationary: false, local: true }];
-  for (let n = 0; n < 400; n++) { c.T += 50; c.send(wobbly(c.T), { source: "local" }); c.frame(); }
+  const wobbly = (t) => [{ id: "bike", coord: [500 + (t % 100 ? 2 : -2), 600 + (t % 150 ? 1 : -1), 220, 300], objectType: "vehicle", stationary: false }];
+  for (let n = 0; n < 400; n++) { c.T += 50; c.send(wobbly(c.T)); c.frame(); }
   ok(!c._active, "a parked thing reported as moving, 20 times a second for 20 s, wobbling a little: the card isn't taken in (it goes by what the box does, too)");
   c.run(1500, (t) => [...wobbly(t), car("real", 100 + (t - 20000) * 0.2)]);
   ok(!!c._active && c._active.subject === "real" && ids(c) === "real", "a car that then really drives in: woken at once, on the car; the bike still isn't boxed");
@@ -1183,23 +1115,23 @@ ok(w._built && !w._building, "next good config builds after a failure");
   let r = await track({}, (t, x) => [suv, car("pass", x(t))], (t, x) => (x(t) < 1000 ? [suv, car("pass", x(t))] : [suv]));
   ok([...r.seen].join() === "pass" && r.onSuv === 0 && !r.c2._active, "a car drives past a parked one and on out of the picture: followed all the way, never on the parked one, then standing by");
   r.c2.disconnectedCallback();
-  // 2. the tracker hands the passer's id to the parked car: its box stops dead on the SUV's place
-  r = await track({}, (t, x) => [suv, x(t) < 440 ? car("pass", x(t)) : { id: "pass", coord: [452 + (t % 200 ? 1 : -1), 141, 108, 69], objectType: "vehicle", stationary: false, local: true }], (t) => [suv, { id: "pass", coord: [452 + (t % 200 ? 1 : -1), 141, 108, 69], objectType: "vehicle", stationary: false, local: true }]);
+  // 2. Protect hands the passer's id to the parked car: its box stops dead on the SUV's place
+  r = await track({}, (t, x) => [suv, x(t) < 440 ? car("pass", x(t)) : { id: "pass", coord: [452 + (t % 200 ? 1 : -1), 141, 108, 69], objectType: "vehicle", stationary: false }], (t) => [suv, { id: "pass", coord: [452 + (t % 200 ? 1 : -1), 141, 108, 69], objectType: "vehicle", stationary: false }]);
   ok(r.onSuv <= 5 && !r.c2._active, `the passer's id ends up on the parked car, reported as moving: counted as lost there (zoomed on the parked one for ${r.onSuv * 100} ms beyond the moment the car itself was there), then standing by`);
   r.c2.disconnectedCallback();
   // 3. the same, with the parked car's own report gone once the id sits on it (only what was remembered tells)
-  r = await track({}, (t, x) => (x(t) < 440 ? [suv, car("pass", x(t))] : [{ id: "pass", coord: [452, 141, 108, 69], objectType: "vehicle", stationary: false, local: true }]), () => [{ id: "pass", coord: [452, 141, 108, 69], objectType: "vehicle", stationary: false, local: true }]);
+  r = await track({}, (t, x) => (x(t) < 440 ? [suv, car("pass", x(t))] : [{ id: "pass", coord: [452, 141, 108, 69], objectType: "vehicle", stationary: false }]), () => [{ id: "pass", coord: [452, 141, 108, 69], objectType: "vehicle", stationary: false }]);
   ok(r.onSuv <= 5 && !r.c2._active, `the parked car's own report gone meanwhile: where it stood is remembered, and the subject is still counted as lost (${r.onSuv * 100} ms)`);
   r.c2.disconnectedCallback();
   // 4. the passer vanishes at the parked car and a new 'moving' id appears on it
-  r = await track({}, (t, x) => (x(t) < 440 ? [suv, car("pass", x(t))] : [suv, { id: "ghost", coord: [455, 142, 105, 68], objectType: "vehicle", stationary: false, local: true }]), () => [suv, { id: "ghost", coord: [455, 142, 105, 68], objectType: "vehicle", stationary: false, local: true }]);
+  r = await track({}, (t, x) => (x(t) < 440 ? [suv, car("pass", x(t))] : [suv, { id: "ghost", coord: [455, 142, 105, 68], objectType: "vehicle", stationary: false }]), () => [suv, { id: "ghost", coord: [455, 142, 105, 68], objectType: "vehicle", stationary: false }]);
   ok(r.onSuv <= 5 && !r.c2._active, `a new id turning up on the parked car as the passer disappears: not settled on either (${r.onSuv * 100} ms)`);
   r.c2.disconnectedCallback();
   // 5. the subject's box jumps across the picture
   c = await mkc({ types: ["vehicle"] }); c.run(1500, (t) => [car("j", 100 + t * 0.1)]); c.run(300, () => [car("j", 800)]);
   ok(c._active.subject !== "j", "the subject's box jumps across the picture from one report to the next: not followed there"); c.disconnectedCallback();
   // 6. and with the real passer still driving on after the mix-up: the view goes with what moves
-  r = await track({}, (t, x) => [suv, car("pass", x(t))], (t, x, t0) => [suv, { id: "pass", coord: [452, 141, 108, 69], objectType: "vehicle", stationary: false, local: true }, ...(x(t) < 1000 ? [car("pass2", x(t))] : [])]);
+  r = await track({}, (t, x) => [suv, car("pass", x(t))], (t, x, t0) => [suv, { id: "pass", coord: [452, 141, 108, 69], objectType: "vehicle", stationary: false }, ...(x(t) < 1000 ? [car("pass2", x(t))] : [])]);
   ok(r.seen.has("pass2") && r.onSuv <= 5, "the id stays on the parked car while the car itself drives on under a new id: the view goes on with the car");
   r.c2.disconnectedCallback();
   // a vehicle that really stops is let go after the linger (not 20 s)
@@ -1254,10 +1186,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
     ok(/\n  \.chip\[hidden\] \{ display: none; \}/.test(fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8")), "a chip that is hidden is really not shown (the empty warning pill beside the camera's name)");
     // the reticle look is four corners and nothing else: no edge joins them in any state
     { const sheet = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8"); const rules = sheet.match(/\.bs-reticle[^{]*\.box[^{]*::after[^{]*\{[^}]*\}/g) || [];
-      ok(rules.length === 0 && !/\.bs-reticle \.pip \{ outline/.test(sheet) && /\.bs-reticle \.box \{ border-color: transparent/.test(sheet), "reticle: only the four corner brackets are drawn (no thin edge between them on the subject, the others, faces or the inset): " + rules.length + " edge rules");
-      ok(/\.bs-reticle \.box\.seen \{ --bt: calc\(1\.5px/.test(sheet) && /\.bs-reticle \.box\.seen::before \{ opacity: \.65; \}/.test(sheet), "a thing only seen so far is told by thinner, lighter corners"); }
-    // a box of Protect's own, passed on by Protect Tracker (the mark on the card says whose it is; the brackets are the same)
-    c = await mkc({ types: ["person"] }); c.run(1500, (t) => [walker2("u", t)]); c._active.sub.using = "tracker"; c.frame(); ok(c._active.mainEl.className.includes("passed"), "Protect's own box while Protect Tracker is in use: marked as passed on"); c._active.sub.lt.tracks.get("u").local = true; c.frame(); ok(!c._active.mainEl.className.includes("passed"), "one made on this machine: not"); c.disconnectedCallback();
+      ok(rules.length === 0 && !/\.bs-reticle \.pip \{ outline/.test(sheet) && /\.bs-reticle \.box \{ border-color: transparent/.test(sheet), "reticle: only the four corner brackets are drawn (no thin edge between them on the subject, the others or the inset): " + rules.length + " edge rules"); }
     // less motion asked for: no flights
     win.matchMedia = () => ({ matches: true });
     c = await mkc({ types: ["person"], linger: 3 }); c.T += 100; c.send([walker2("w", c.T)]);
@@ -1276,7 +1205,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
   // --- the face inset
   {
     const person = (t, extra = {}) => ({ id: "p", coord: [300 + t * 0.02, 250, 100, 300], objectType: "person", stationary: false, confidence: 90, ...extra });
-    const faceOf = (t, extra = {}) => ({ id: "p:face", coord: [330 + t * 0.02, 262, 30, 40], objectType: "face", of: "p", local: true, ...extra });
+    const faceOf = (t, extra = {}) => ({ id: "f", coord: [330 + t * 0.02, 262, 30, 40], objectType: "face", ...extra });
     const up = async (cfg, first) => { const c2 = await mkc({ types: ["person"], ...cfg }); c2.run(300, first); const v = Object.assign(new El(), { tagName: "VIDEO", videoWidth: 3840, videoHeight: 2160, readyState: 4, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 562 }) }); c2._active.stream.querySelectorAll = () => [v]; c2._root.querySelector(".zoomer").getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 562 }); c2.vid = v; return c2; };
     const pip = (c2) => c2._root.querySelector(".pip"); const cvs = (c2) => pip(c2).firstElementChild;
     const draws = (c2) => (cvs(c2)._g ? cvs(c2)._g.calls.filter((x) => x[0] === "drawImage") : []);
@@ -1302,14 +1231,14 @@ ok(w._built && !w._building, "next good config builds after a failure");
     // the person lost: gone with them
     c.run(1500, () => null); ok(!pip(c).classList.contains("on"), "the person lost: the inset goes with them");
     c.disconnectedCallback();
-    // Protect's own face (no `of`), inside the person's box
+    // another face of Protect's, inside the person's box
     c = await up({}, (t) => [person(t), { id: "f1", coord: [335 + t * 0.02, 265, 28, 36], objectType: "face" }]); c.run(1500, (t) => [person(t), { id: "f1", coord: [335 + t * 0.02, 265, 28, 36], objectType: "face" }]);
     ok(pip(c).classList.contains("on"), "a face of Protect's own inside the person's box counts as theirs"); c.disconnectedCallback();
     c = await up({}, (t) => [person(t), { id: "f2", coord: [800, 265, 28, 36], objectType: "face" }]); c.run(1500, (t) => [person(t), { id: "f2", coord: [800, 265, 28, 36], objectType: "face" }]);
     ok(!pip(c).classList.contains("on"), "a face somewhere else in the picture does not"); c.disconnectedCallback();
     // off, other kinds, split, small cards
     c = await up({ face_pip: "off" }, both); c.run(1500, both); ok(!pip(c).classList.contains("on") && draws(c).length === 0, "face_pip: off: never, and nothing drawn"); c.disconnectedCallback();
-    c = await up({ types: ["vehicle"] }, (t) => [{ id: "v", coord: [300 + t * 0.02, 250, 100, 60], objectType: "vehicle", stationary: false }, { id: "v:face", coord: [330, 262, 30, 40], objectType: "face", of: "v" }]); c.run(1500, (t) => [{ id: "v", coord: [300 + t * 0.02, 250, 100, 60], objectType: "vehicle", stationary: false }, { id: "v:face", coord: [330, 262, 30, 40], objectType: "face", of: "v" }]);
+    c = await up({ types: ["vehicle"] }, (t) => [{ id: "v", coord: [300 + t * 0.02, 250, 100, 60], objectType: "vehicle", stationary: false }, { id: "vf", coord: [330, 262, 30, 40], objectType: "face" }]); c.run(1500, (t) => [{ id: "v", coord: [300 + t * 0.02, 250, 100, 60], objectType: "vehicle", stationary: false }, { id: "vf", coord: [330, 262, 30, 40], objectType: "face" }]);
     ok(!pip(c).classList.contains("on"), "never for anything but a person"); c.disconnectedCallback();
     c = await up({}, both); Object.assign(c._root.querySelector(".frame"), { clientWidth: 200, clientHeight: 120 }); c.run(1500, both); ok(!pip(c).classList.contains("on"), "a card too small for it: no inset"); c.disconnectedCallback();
     c = await up({ split: 2 }, (t) => [...both(t), { id: "q", coord: [700 - t * 0.02, 250, 100, 300], objectType: "person", stationary: false }]); c.run(2500, (t) => [...both(t), { id: "q", coord: [700 - t * 0.02, 250, 100, 300], objectType: "person", stationary: false }]);
@@ -1317,7 +1246,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
     c = await up({}, both); c.run(1500, both); c._leave(); ok(!pip(c).classList.contains("on"), "standing by again: gone"); c.disconnectedCallback();
     // someone walking briskly across the picture: the inset keeps up with the face
     { const walk = (t) => ({ id: "p", coord: [100 + t * 0.15, 250, 100, 300], objectType: "person", stationary: false, confidence: 90 }); // 150 units a second: across the picture in under 7 s
-      const fwalk = (t) => ({ id: "p:face", coord: [130 + t * 0.15, 262, 30, 40], objectType: "face", of: "p", local: true });
+      const fwalk = (t) => ({ id: "f", coord: [130 + t * 0.15, 262, 30, 40], objectType: "face" });
       // (a position sent at the test's time T is stamped T - 330, and the picture is 300 ms behind: what is on screen at T is what was sent at T + 30)
       const w = await up({}, (t) => [walk(t), fwalk(t)]); let worst = 0;
       const centre = () => { const dd = draws(w)[draws(w).length - 1]; return dd[2] + dd[4] / 2; };
@@ -1329,30 +1258,24 @@ ok(w._built && !w._building, "next good config builds after a failure");
       for (let n = 0; n < 30; n++) { w.T += 33; w.send([walk(w.T)]); w.frame(); }
       const moved = centre() - before; const personMoved = ((w.T - t0) * 0.15 / 1000) * 3840;
       ok(pip(w).classList.contains("on") && Math.abs(moved - personMoved) < faceW * 0.4, `the face not reported for a second while they walk on: the inset goes along with them, showing where the face was on them (moved ${Math.round(moved)} px; they moved ${Math.round(personMoved)})`);
-      { const fe = w._active.els.get("p:face"); const pe = w._active.els.get("p"); const left = (el) => parseFloat(/left:([\d.]+)%/.exec(el.style.cssText)[1]);
-        ok(!!fe && fe.className === "box part" && Math.abs(left(fe) - left(pe) - 3) < 0.4, `and its small brackets on the picture are still on the person's head, not left behind where the face was last found (${(left(fe) - left(pe)).toFixed(1)} % of the picture from the person's left edge; it was 3.0)`); }
       for (let n = 0; n < 10; n++) { w.T += 33; w.send([walk(w.T), fwalk(w.T)]); w.frame(); }
       ok(Math.abs(centre() - ((130 + (w.T + 30) * 0.15 + 15) / 1000) * 3840) < faceW * 0.4, "the face is reported again: straight back on it, no jump from somewhere left behind");
       w.disconnectedCallback(); }
     // a face found only now and then (every sixth frame), on someone walking: the brackets and the inset don't fall behind in between
     { const walk = (t) => ({ id: "p", coord: [100 + t * 0.15, 250, 100, 300], objectType: "person", stationary: false, confidence: 90 });
-      const fwalk = (t) => ({ id: "p:face", coord: [130 + t * 0.15, 262, 30, 40], objectType: "face", of: "p", local: true });
-      const w = await up({}, (t) => [walk(t), fwalk(t)]); let worstPip = 0, worstBox = 0; const snap = { mode: "local", source: "local", snapshot: true };
-      const left = (el) => parseFloat(/left:([\d.]+)%/.exec(el.style.cssText)[1]);
-      for (let n = 0; n < 90; n++) { w.T += 33; w.send(n % 6 === 0 ? [walk(w.T), fwalk(w.T)] : [walk(w.T)], snap); w.frame();
-        if (n > 30) { const dd = draws(w)[draws(w).length - 1]; worstPip = Math.max(worstPip, Math.abs(dd[2] + dd[4] / 2 - ((130 + (w.T + 30) * 0.15 + 15) / 1000) * 3840)); const fe = w._active.els.get("p:face"); worstBox = Math.max(worstBox, fe ? Math.abs(left(fe) - (130 + (w.T + 30) * 0.15) / 10) : 99); } }
-      ok(pip(w).classList.contains("on") && worstPip < 115 * 0.4 && worstBox < 1, `a face found only in every sixth packet (the others say it has gone), on someone walking: the inset stays within ${Math.round(worstPip)} px of the stream and the brackets within ${worstBox.toFixed(2)} % of the picture, with no flicker`);
+      const fwalk = (t) => ({ id: "f", coord: [130 + t * 0.15, 262, 30, 40], objectType: "face" });
+      const w = await up({}, (t) => [walk(t), fwalk(t)]); let worstPip = 0;
+      for (let n = 0; n < 90; n++) { w.T += 33; w.send(n % 6 === 0 ? [walk(w.T), fwalk(w.T)] : [walk(w.T)]); w.frame();
+        if (n > 30) { const dd = draws(w)[draws(w).length - 1]; worstPip = Math.max(worstPip, Math.abs(dd[2] + dd[4] / 2 - ((130 + (w.T + 30) * 0.15 + 15) / 1000) * 3840)); } }
+      ok(pip(w).classList.contains("on") && worstPip < 115 * 0.4, `a face found only in every sixth packet, on someone walking: the inset stays within ${Math.round(worstPip)} px of the stream, with no flicker`);
       w.disconnectedCallback(); }
-    // the face's own brackets on the picture have no easing at all
-    { const css2 = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8"); const rule = (css2.match(/\.bs-reticle \.box\.part \{[^}]*\}/) || [""])[0];
-      ok(rule && !/transition/.test(rule) && !/\.box\.part[^{]*\{[^}]*transition/.test(css2) && !/\n  \.box \{[^}]*transition/.test(css2), "the small face brackets on the picture are placed each frame, with no transition to slow them"); }
     // which corner
     const corner = Trk.pipCorner;
     ok(corner(null, [400, 150, 200, 260], 1000, 562, 180).corner === "br" && corner(null, [700, 300, 250, 260], 1000, 562, 180).corner === "bl", "the corner: bottom right by default; another when the person is there");
     ok(corner("br", [600, 300, 250, 260], 1000, 562, 180).corner !== "br" && corner("bl", [400, 150, 200, 260], 1000, 562, 180).corner === "bl", "it moves out of the way when the person walks under it, and otherwise stays where it is (no going back for nothing)");
     ok(corner("br", null, 1000, 562, 180).corner === "br" && corner(null, [0, 0, 1000, 562], 1000, 562, 180).corner === "br", "nobody to avoid, or nowhere to go: it stays");
     const where = corner(null, [400, 150, 200, 260], 1000, 562, 180); ok(where.left === 1000 - 180 - 8 && where.top === 562 - 180 - 8, "(8 px in from the card's edges)");
-    ok(new Trk().constructor.faceOf({ t: { id: "p", type: "vehicle" }, box: [0, 0, 100, 100] }, [{ t: { type: "face" }, of: "p", box: [1, 1, 5, 5] }]) === null, "(faceOf: only people have one)");
+    ok(new Trk().constructor.faceOf({ t: { id: "p", type: "vehicle" }, box: [0, 0, 100, 100] }, [{ t: { type: "face" }, box: [1, 1, 5, 5] }]) === null, "(faceOf: only people have one)");
   }
 
   // steady zoom: the box's size wobbling a little between packets doesn't move the zoom
@@ -1389,10 +1312,10 @@ ok(w._built && !w._building, "next good config builds after a failure");
   // the wall: Home Assistant's dialog, on the wall's config as written
   await pick(w, "Edit the wall…");
   ok(w.shown.length === 1 && w.shown[0].dialogTag === "hui-dialog-edit-card" && typeof w.shown[0].dialogImport === "function" && JSON.stringify(w.shown[0].dialogParams.cardConfig) === JSON.stringify(wallCfg), "it opens Home Assistant's own card dialog, with the wall's config as it is written in the dashboard");
-  await w.shown[0].dialogParams.saveCardConfig({ ...wallCfg, source: "local", live_debug: true });
+  await w.shown[0].dialogParams.saveCardConfig({ ...wallCfg, ptz: false, live_debug: true });
   const after = w.saved[0];
-  ok(w.saved.length === 1 && after.views[1].sections[0].cards[1].source === "local" && after.views[1].sections[0].cards[1].live_debug === true && JSON.stringify(after.views[0]) === JSON.stringify(dashConf().views[0]) && JSON.stringify(after.views[1].sections[0].cards[0]) === JSON.stringify({ type: "tile", entity: "light.x" }), "what the dialog saves goes into the dashboard at the wall's place; nothing else there changes");
-  let threw = false; try { await w.shown[0].dialogParams.saveCardConfig({ source: "local" }); } catch (e) { threw = true; } ok(threw && w.saved.length === 1, "a config without a type is refused, nothing saved");
+  ok(w.saved.length === 1 && after.views[1].sections[0].cards[1].ptz === false && after.views[1].sections[0].cards[1].live_debug === true && JSON.stringify(after.views[0]) === JSON.stringify(dashConf().views[0]) && JSON.stringify(after.views[1].sections[0].cards[0]) === JSON.stringify({ type: "tile", entity: "light.x" }), "what the dialog saves goes into the dashboard at the wall's place; nothing else there changes");
+  let threw = false; try { await w.shown[0].dialogParams.saveCardConfig({ ptz: false }); } catch (e) { threw = true; } ok(threw && w.saved.length === 1, "a config without a type is refused, nothing saved");
   // saving again with the dashboard changed underneath: said, not guessed
   w.ll.config = { views: [{ cards: [{ type: "markdown", content: "only this now" }] }] }; threw = false; try { await w.shown[0].dialogParams.saveCardConfig({ ...wallCfg, arrange: false }); } catch (e) { threw = /has changed/.test(e.message); }
   ok(threw && w.saved.length === 1, "the wall no longer where it was in the dashboard: the save fails with a reason, nothing is written");
@@ -1418,10 +1341,10 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const mke = (cfg) => { const e = Wall.getConfigElement(); const out = []; e.addEventListener("config-changed", (ev) => out.push(ev.detail.config)); e.hass = hass; e.setConfig(cfg); e.connectedCallback(); e.out = out; return e; };
   const change = (e, patch) => e._form.dispatchEvent(new Ev("value-changed", { detail: { value: { ...e._form.data, ...patch } }, stopPropagation() {} }));
   let e = mke({ type: "custom:camera-wall-card" }); const d = e._form.data;
-  ok(e instanceof defs["camera-wall-card-editor"] && d.history === true && d.tracking === true && d.arrange === true && d.live_tracks === true && d.source === "auto" && d.live_delay === 700 && d.live_offset === 0 && d.live_debug === false && d.zone_overlay === true && d.phone_landscape === true && Math.abs(d.aspect_ratio - 1.7778) < 1e-9, "the wall has an editor of its own, and what the config leaves out is shown as the wall does it");
-  ok(["source", "live_debug", "exclude", "order", "alarm", "layout", "local_url", "remote_url"].every((n) => e._form.schema.some((f) => f.name === n)) && e._form.computeLabel({ name: "source" }) === "Whose boxes", "its documented options are there, source and live_debug among them");
+  ok(e instanceof defs["camera-wall-card-editor"] && d.history === true && d.tracking === true && d.arrange === true && d.live_tracks === true && !("source" in d) && d.live_delay === 700 && d.live_offset === 0 && d.live_debug === false && d.zone_overlay === true && d.phone_landscape === true && Math.abs(d.aspect_ratio - 1.7778) < 1e-9, "the wall has an editor of its own, and what the config leaves out is shown as the wall does it");
+  ok(["ptz", "live_debug", "exclude", "order", "alarm", "layout", "local_url", "remote_url"].every((n) => e._form.schema.some((f) => f.name === n)) && !e._form.schema.some((f) => f.name === "source") && /timed/.test(e._form.computeLabel({ name: "live_debug" })), "its documented options are there, live_debug among them; whose boxes is no longer one");
   change(e, {}); ok(e.out.length === 0, "nothing changed: nothing written");
-  change(e, { source: "local" }); ok(e.out.length === 1 && JSON.stringify(e.out[0]) === JSON.stringify({ type: "custom:camera-wall-card", source: "local" }), "one option changed: only that one is written");
+  change(e, { ptz: false }); ok(e.out.length === 1 && JSON.stringify(e.out[0]) === JSON.stringify({ type: "custom:camera-wall-card", ptz: false }), "one option changed: only that one is written");
   change(e, { exclude: ["Garage*"], live_debug: true }); ok(e.out[1].exclude.join() === "Garage*" && e.out[1].live_debug === true && !("live_delay" in e.out[1]), "more of them; the rest still left out");
   change(e, { exclude: [] }); ok(!("exclude" in e.out[2]), "a list emptied: taken out");
   change(e, { tracking: false }); ok(e.out[3].tracking === false, "tracking tiles switched off: tracking: false");
@@ -1432,163 +1355,6 @@ ok(w._built && !w._building, "next good config builds after a failure");
   ok(e.out.length === 1 && e.out[0].alarm === false && Array.isArray(e.out[0].history) && e.out[0].tracking.types.join() === "person" && e.out[0].breakpoints[0].join() === "0,2" && e.out[0].cameras.length === 1 && e.out[0].live_offset === 50, "changing a field leaves what is only in YAML exactly as it was (alarm: false, the lists, tracking's options)");
   change(e, { history: false }); ok(e.out[1].history === false, "switching History off replaces the list with false (said so by the switch)");
   ctx.localStorage.store = {};
-}
-// --- Protect Tracker's local mode
-{
-  ctx.localStorage.store = {};
-  const TR = "protect_tracker/live/subscribe", PR = "protect_detections/live/subscribe";
-  const realTimeout = ctx.setTimeout; ctx.setTimeout = (f, ms) => (ms >= 100000 ? { held: true } : realTimeout(f, ms));
-  // a connection whose Protect Tracker is `kind`: "new" (knows mode), "old" (refuses the extra word), or absent
-  const mkConn = (kind) => { const c = { asked: [], open: new Map(),
-    subscribeMessage(cb, m) { if (!m.type.endsWith("/live/subscribe")) return Promise.resolve(() => {}); c.asked.push(m.type === TR ? "tracker" + (m.mode ? ":" + m.mode : "") : "protect");
-      if (m.type === TR && !kind) return Promise.reject({ code: "unknown_command" });
-      if (m.type === TR && kind === "down") return Promise.reject({ code: "not_ready", message: "engine not connected" });
-      if (m.type === TR && kind === "old" && "mode" in m) return Promise.reject({ code: "invalid_format", message: "extra keys not allowed @ data['mode']" });
-      c.open.set(m.type, cb); c.mode = m.mode || null; return Promise.resolve(() => c.open.delete(m.type)); } }; return c; };
-  const run = async (kind, source) => { const conn = mkConn(kind); const states = []; const stop = ctx.subscribeLive({ connection: conn }, "camera.x", source, () => {}, (st) => states.push(`${st.using}/${st.mode || "-"}${st.code ? ":" + st.code : ""}`)); await tick(); await tick(); return { conn, states, stop }; };
-  let r = await run("new", "local"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "tracker/local", "source local: Protect Tracker is asked for its local mode"); r.stop();
-  r = await run("old", "local"); ok(r.conn.asked.join() === "tracker:local,tracker" && r.states.join() === "tracker/auto" && r.conn.mode === null, "a Protect Tracker from before that mode refuses the word: its ordinary feed is used, and the state says which"); r.stop();
-  r = await run(null, "local"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "null/-:unknown_command", "no Protect Tracker at all: said so (not tried a second way, not Protect's instead)"); r.stop();
-  r = await run("down", "local"); ok(r.conn.asked.join() === "tracker:local" && r.states.join() === "null/-:not_ready", "its engine not running (not_ready): said as that, and its mixed feed is not used in its place"); r.stop();
-  r = await run("new", "auto"); ok(r.conn.asked.join() === "tracker" && r.states.join() === "tracker/auto", "source auto: its ordinary mode, no word added"); r.stop();
-  r = await run("new", "protect"); ok(r.conn.asked.join() === "protect" && r.states.join() === "protect/-", "source protect: not asked at all"); r.stop();
-  // --- auto, local first (what the tracking card's auto means)
-  {
-    // a connection with Protect Tracker's local mode, its ordinary (mixed) mode and Protect's own, each there or not
-    const mkC = (have) => { const c = { have: { ...have }, open: {}, asked: [], stopped: [],
-      subscribeMessage(cb, m) { const k = m.type === TR ? (m.mode === "local" ? "local" : "mixed") : "protect"; c.asked.push(k);
-        if (!c.have[k]) return Promise.reject({ code: k === "protect" ? "unknown_command" : c.have.tracker === false ? "unknown_command" : k === "local" ? (c.have.localErr || "not_ready") : "not_ready" });
-        c.open[k] = cb; return Promise.resolve(() => { c.stopped.push(k); delete c.open[k]; }); } }; return c; };
-    const real = Date.now; let now = Math.floor(real() / 1000) * 1000; Date.now = () => now; // (a clock of the test's own, in whole half seconds)
-    const before = new Set(timers);
-    const stamps = [];
-    const go = async (have) => { const conn = mkC(have); const states = []; const got = []; const stop = ctx.subscribeLive({ connection: conn }, "camera.x", "auto", (m) => got.push(m), (st) => { states.push(`${st.using}/${st.mode || "-"}${st.code ? ":" + st.code : ""}`); stamps.push(now); }, { autoLocal: true }); await tick(); await tick();
-      const tk = [...timers].filter((t) => !before.has(t)).pop(); before.add(tk); return { conn, states, got, stop, tickOnce: async () => { tk.f(); await tick(); await tick(); } }; };
-    const beat = (r, extra = {}) => r.conn.open.local({ clockWall: now, clockStream: now - 5, clockStreamRate: 1000, mode: "local", source: "local", snapshot: true, tracks: [], ...extra });
-    const pass = async (r, ms, beats = true) => { for (let end = now + ms; now < end; ) { now += 500; if (beats && r.conn.open.local) beat(r); if (now % 1000 < 500) await r.tickOnce(); } };
-    // 1. all there: the local mode, and only that
-    let r = await go({ local: true, mixed: true, protect: true });
-    ok(r.conn.asked.join() === "local" && r.states.join() === "tracker/local", "auto, local first: Protect Tracker's local mode is listened to, and nothing else is opened");
-    await pass(r, 5000); ok(r.conn.asked.join() === "local" && r.states.join() === "tracker/local" && r.got.length >= 9, "while it tells (a heartbeat a second): it stays");
-    // 2. it goes silent with no word of warning
-    await pass(r, 3000, false); ok(r.states.join() === "tracker/local", "silent for 3 s: not yet given up on");
-    await pass(r, 1500, false);
-    ok(r.states.join() === "tracker/local,tracker/auto" && r.conn.asked.join() === "local,mixed" && !!r.conn.open.local, "silent for over 3.5 s: over to its ordinary mode by itself; the local subscription is kept, to hear when it is back");
-    r.conn.open.mixed({ clockWall: now, tracks: [] }); ok(r.got[r.got.length - 1].snapshot === undefined, "and the ordinary mode's messages are what the card gets now");
-    // 3. the heartbeat is back: not at once, only when it has been steady
-    const n0 = r.got.length; await pass(r, 2000); ok(r.states.join() === "tracker/local,tracker/auto" && r.got.length === n0, "the heartbeat back for 2 s: still on the ordinary mode (and the local words are not passed on meanwhile)");
-    await pass(r, 2000); ok(r.states.join() === "tracker/local,tracker/auto,tracker/local" && r.conn.stopped.join() === "mixed", "steady for over 3 s: back to the local mode, and the ordinary one is let go");
-    // 4. a feed that comes and goes every couple of seconds doesn't have it hopping
-    const s0 = r.states.length; for (let k = 0; k < 6; k++) { await pass(r, 5000, false); await pass(r, 2000, true); }
-    ok(r.states.length - s0 === 1 && r.states[r.states.length - 1] === "tracker/auto", `off for 5 s, on for 2, six times over: one change to the ordinary mode and it stays there (${r.states.length - s0} change, not twelve)`);
-    await pass(r, 4000); ok(r.states[r.states.length - 1] === "tracker/local", "then steady again: back");
-    // 5. it says its engine's connection has gone: at once
-    r.conn.open.local({ status: "disconnected", mode: "local" }); await tick(); await tick();
-    ok(r.states[r.states.length - 1] === "tracker/auto" && !r.got.some((m) => m.status === "disconnected"), "it says its engine's connection is gone: over to the ordinary mode at once (the card isn't told 'disconnected': it has a feed)");
-    r.conn.open.local({ status: "connected", mode: "local", service: true }); await pass(r, 4000); ok(r.states[r.states.length - 1] === "tracker/local", "connected again and telling steadily: back");
-    r.stop(); ok(r.conn.stopped.includes("local") && Object.keys(r.conn.open).length === 0, "stopped: everything let go");
-    // 6. the three ways down
-    r = await go({ local: false, mixed: true, protect: true }); ok(r.conn.asked.join() === "local,mixed" && r.states.join() === "tracker/auto", "no local mode (an older Protect Tracker, or its engine not running): its ordinary mode"); r.stop();
-    r = await go({ local: false, mixed: false, protect: true }); ok(r.conn.asked.join() === "local,mixed,protect" && r.states.join() === "protect/-", "Protect Tracker answering neither way: Protect's own"); r.stop();
-    r = await go({ tracker: false, protect: true }); ok(r.conn.asked.join() === "local,mixed,protect" && r.states.join() === "protect/-", "no Protect Tracker at all: Protect's own, as it always was"); r.stop();
-    r = await go({ tracker: false }); ok(r.states.join() === "null/-:unknown_command", "nothing there at all: said"); r.stop();
-    Date.now = real;
-  }
-  r = await run("new", "auto"); ok(r.conn.asked.join() === "tracker", "(without the switch, auto is the ordinary mode: the wall's live view)"); r.stop();
-  ok(Trk.autoLocal === true, "the tracking card's auto is local first");
-
-
-  // --- the clocks: positions go by the stream clock, so a corrected wall clock moves nothing
-  const B = 1_700_000_300_000, S = 55_000_000; const real = Date.now;
-  const lt = new ctx.LiveTracks(); const pos = (ms) => 100 + ms * 0.2;
-  const pkt = (ms, wallOff, extra = {}) => ({ clockWall: B + ms + wallOff, clockStream: S + ms, clockStreamRate: 1000, source: "local", tracks: [{ id: "L1", coord: [pos(ms), 300, 60, 160], objectType: "person", local: true, confirmed: false, moving: true, stationary: false, ...extra }] });
-  let worst = 0; let prev = null;
-  for (let ms = 0; ms <= 3000; ms += 33) {
-    Date.now = () => B + ms + 7000; lt.message(pkt(ms, ms < 1500 ? 0 : 640)); // Protect's first report arrives at 1.5 s: the wall clock is put right by 640 ms
-    const box = ctx.LiveTracks.at(lt.tracks.get("L1"), lt.latest - 200); if (box && prev != null) worst = Math.max(worst, Math.abs(box[0] - prev - 0.2 * 33)); if (box) prev = box[0];
-  }
-  Date.now = real;
-  ok(worst < 0.5 && lt.tracks.get("L1").pts.length > 85, `the sender puts its wall clock right by 640 ms in mid flight: the positions carry on evenly, none dropped (furthest from an even pace: ${worst.toFixed(2)} units)`);
-  ok(lt.tracks.get("L1").confirmed === false && lt.tracks.get("L1").local === true, "seen by the model only (not confirmed): kept per thing");
-  Date.now = () => B + 3100 + 7000; lt.message(pkt(3100, 640, { confirmed: true, protectId: "P1", desc: "red" })); Date.now = real;
-  ok(lt.tracks.get("L1").confirmed === true && lt.tracks.get("L1").desc === "red" && lt.tracks.size === 1, "Protect's details attached in flight: the same thing, now confirmed");
-  // the stream clock starting over (the camera restarted): taken up afresh, nothing stuck
-  Date.now = () => B + 60000 + 7000; lt.message({ clockWall: B + 60000, clockStream: 500, clockStreamRate: 1000, source: "local", tracks: [{ id: "L2", coord: [10, 10, 50, 50], objectType: "person", local: true }] }); Date.now = real;
-  ok(lt.tracks.size === 1 && lt.tracks.has("L2") && lt.tracks.get("L2").pts.length === 1, "the stream clock starts over: what was held is let go and the new positions are taken");
-  // a packet that tells every thing there is: one not told has gone, at once
-  { const sn = new ctx.LiveTracks(); const pk = (ms, ids) => ({ clockWall: B + ms, clockStream: S + ms, clockStreamRate: 1000, mode: "local", source: "local", snapshot: true, eventId: null, tracks: ids.map((id, k) => ({ id, coord: [100 + ms * 0.1 + k * 300, 300, 60, 160], objectType: "person", local: true, confirmed: false, moving: true, stationary: false })) });
-    for (let ms = 0; ms <= 900; ms += 100) { Date.now = () => B + ms + 7000; sn.message(pk(ms, ["L1", "L2"])); }
-    Date.now = () => B + 1000 + 7000; sn.message(pk(1000, ["L1"])); Date.now = real;
-    ok(sn.mode === "local" && sn.whole === true, "local packets say their mode and that each tells every thing there is");
-    ok(ctx.LiveTracks.at(sn.tracks.get("L2"), B + 900) !== null && ctx.LiveTracks.at(sn.tracks.get("L2"), B + 1000) === null && ctx.LiveTracks.at(sn.tracks.get("L1"), B + 1000) !== null, "a thing left out of such a packet has gone as of its last position: not carried on, not held for a moment");
-    const plain = new ctx.LiveTracks(); for (let ms = 0; ms <= 900; ms += 100) plain.message({ clockWall: B + ms, tracks: [{ id: "u", coord: [100 + ms * 0.1, 300, 60, 160], objectType: "person" }] }); plain.message({ clockWall: B + 1000, tracks: [] });
-    ok(ctx.LiveTracks.at(plain.tracks.get("u"), B + 1100) !== null, "(a feed that doesn't say so keeps the short hold, as before)");
-    // the heartbeat: an empty packet every second; gone quiet means the camera isn't served
-    Date.now = () => B + 2000 + 7000; sn.message(pk(2000, [])); ok(sn.quiet === false && sn.tracks.size >= 1, "an empty packet (the heartbeat): heard, nothing wrong");
-    Date.now = () => B + 6000 + 7000; ok(sn.quiet === true && plain.quiet === false, "nothing for four seconds from a sender that tells every second: gone quiet (a feed that only speaks when there is something is never 'quiet')"); Date.now = real; }
-  // the engine's own view of moving
-  const mv = new ctx.LiveTracks(); ctx.LiveTracks.SETTLE_MS = -Infinity;
-  mv.message({ clockWall: B, tracks: [{ id: "a", coord: [1, 1, 50, 50], objectType: "person", stationary: false, moving: false }, { id: "b", coord: [200, 1, 50, 50], objectType: "person", stationary: false, moving: true }, { id: "c", coord: [400, 1, 50, 50], objectType: "person", stationary: false }] });
-  ok(mv.tracks.get("a").moved === 0 && mv.tracks.get("b").moved === B && mv.tracks.get("c").moved === B, "a sender's own 'not moving' is believed over 'not stationary'; unsaid, it is as before");
-
-  // --- the tracking card in local mode
-  const P = "camera.p_high_resolution_channel";
-  const mkc = async (cfg, kind) => { const conn = mkConn(kind);
-    const h = { ...hass, entities: { [P]: { device_id: "d1", platform: "unifiprotect" } }, states: { [P]: { entity_id: P, state: "recording", attributes: { channel_id: 0 } } }, devices: { d1: { name: "Front" } }, connection: conn,
-      callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { [P]: "p1" } }); if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
-    const c = new Trk(); c.setConfig(cfg); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick(); c.conn = conn; Object.assign(c._root.querySelector(".frame"), { clientWidth: 1000, clientHeight: 562 }); return c; };
-  const note = (c) => c._root.querySelector(".idle .note").textContent;
-  let c = await mkc({ source: "local" }, "new");
-  ok(c.conn.asked.join() === "tracker:local" && note(c) === "", "tracking card, source local: asks for the local mode; nothing to say");
-  // (each report 100 ms after the one before, on a clock of the test's own; the frame half a second on, as the picture runs behind the positions)
-  let seeN = 0; const see0 = Date.now();
-  const see = (c2, tr) => { const realNow = Date.now; const t = see0 + ++seeN * 100; try { Date.now = () => t; c2.conn.open.get(TR)({ clockWall: t - 20, clockStream: 777000 + seeN * 100, clockStreamRate: 1000, source: "local", tracks: [tr] }); Date.now = () => t + 500; if (c2._active) { c2._active.placeAt = 0; c2._frame(c2._active); } } finally { Date.now = realNow; } };
-  see(c, { id: "L9", coord: [400, 300, 60, 160], objectType: "person", local: true, confirmed: false, moving: true, stationary: false, confidence: 72, desc: "", zones: [] });
-  ok(!!c._active && c._active.subject === "L9" && c._active.mainEl.className.includes("seen") && c._active.mainEl.firstChild.textContent === "Person 72%", "someone only the model has seen, with no details from Protect: woken, followed, marked as seen-only, the tag saying what it can: " + [c._active && c._active.subject, c._active && c._active.mainEl && c._active.mainEl.className, c._active && c._active.mainEl && c._active.mainEl.firstChild.textContent].join(" | "));
-  see(c, { id: "L9", coord: [404, 300, 60, 160], objectType: "person", local: true, confirmed: true, protectId: "P3", moving: true, stationary: false, confidence: 91, desc: "blue" });
-  ok(c._active.subject === "L9" && !c._active.mainEl.className.includes("seen") && c._active.mainEl.firstChild.textContent === "Person · blue 91%", "Protect reports them too: the same subject, now confirmed, the tag with Protect's details: " + [c._active.subject, c._active.mainEl.className, c._active.mainEl.firstChild.textContent].join(" | "));
-  c.disconnectedCallback();
-  c = await mkc({ source: "local" }, null); const ltx = new ctx.LiveTracks(); ok(/isn't installed/.test(note(c)), "(no Protect Tracker: said, as before)"); c.disconnectedCallback();
-  c = await mkc({ source: "local", types: ["person"] }, "new");
-  see(c, { id: "L5", coord: [400, 300, 60, 160], objectType: "person", local: true, confirmed: false, moving: false, stationary: false });
-  ok(!c._active, "something the engine itself says is not moving doesn't wake the card, whatever 'stationary' says"); c.disconnectedCallback();
-  c = await mkc({ source: "local" }, "old");
-  ok(/no local mode yet/.test(note(c)) && c.conn.open.has(TR) && !c._state, "an older Protect Tracker: the card says its local mode isn't there yet, and goes by the model's boxes from the mixed feed");
-  c._subs.values().next().value.lt.mode = "auto"; c.conn.open.get(TR)({ status: "connected", mode: "auto", service: true });
-  ok(/no local mode yet/.test(note(c)), "and still says so after that tracker's 'connected'");
-  c.disconnectedCallback();
-  c = await mkc({ source: "local" }, "down"); ok(/engine isn't running/.test(note(c)) && !c.conn.open.has(TR), "its engine not running: said so"); c.disconnectedCallback();
-  // the tracking card on auto (local first): a switch of feed in mid-follow doesn't sound again
-  c = await mkc({ sound: "ping" }, "new"); let chimes = 0; const realChime = c._chime.bind(c); c._chime = () => { chimes++; return realChime(); };
-  ok(c.conn.asked.join() === "tracker:local" && c._subs.values().next().value.using === "tracker", "tracking card on auto: asks for the local mode first");
-  see(c, { id: "L1", coord: [400, 300, 60, 160], objectType: "person", local: true, confirmed: false, moving: true, stationary: false });
-  ok(!!c._active && chimes === 1, "someone the engine sees: woken at once, one sound");
-  const localCb = c.conn.open.get(TR); localCb({ status: "disconnected", mode: "local" }); await tick(); await tick();
-  ok(c.conn.asked.join() === "tracker:local,tracker" && c.conn.open.get(TR) !== localCb && note(c) === "", "the engine's connection goes while following: the card is on the mixed feed, and says nothing alarming");
-  see(c, { id: "P77", coord: [410, 300, 60, 160], objectType: "person", stationary: false }); see(c, { id: "P77", coord: [414, 300, 60, 160], objectType: "person", stationary: false });
-  ok(!!c._active && chimes === 1, "the same person now reported under Protect's id by the other feed: still following, and no second sound");
-  c.disconnectedCallback();
-
-  c = await mkc({ source: "local" }, "new"); c.conn.open.get(TR)({ status: "connected", mode: "local", service: true }); ok(note(c) === "", "local mode connected: nothing to say");
-  c.conn.open.get(TR)({ status: "disconnected", mode: "local" }); ok(/engine is not connected/.test(note(c)), "the engine's connection goes: said");
-  c.conn.open.get(TR)({ status: "connected", mode: "local", service: true }); ok(note(c) === "", "and back: cleared");
-  { const realNow = Date.now; const t0 = realNow(); c.conn.open.get(TR)({ clockWall: t0, clockStream: 5000, clockStreamRate: 1000, mode: "local", source: "local", snapshot: true, tracks: [] });
-    c._quietCheck(); ok(note(c) === "", "heartbeats coming: nothing to say");
-    Date.now = () => t0 + 5000; c._quietCheck(); ok(/gone quiet/.test(note(c)), "no heartbeat for five seconds: the card says the camera isn't being served");
-    c.conn.open.get(TR)({ clockWall: t0 + 5000, clockStream: 10000, clockStreamRate: 1000, mode: "local", source: "local", snapshot: true, tracks: [] }); ok(note(c) === "", "the next heartbeat clears it"); Date.now = realNow; }
-  c.disconnectedCallback();
-
-  // --- the wall's chip
-  const mkw = async (kind) => { const conn = mkConn(kind); const w = new Wall(); w.clientWidth = 1000; w.isConnected = true;
-    w.setConfig({ cameras: [{ entity: "camera.a", name: "A" }], alarm: false, history: false, arrange: false, tracking: false, source: "local" });
-    w.hass = { ...hass, entities: {}, devices: {}, connection: conn, callWS: (m) => (m.type === "network/url" ? Promise.resolve({}) : m.type.endsWith("/live/cameras") ? Promise.resolve({ cameras: { "camera.a": "p1" } }) : new Promise(() => {})) };
-    await tick(); await tick(); await tick(); w._openLive(0); await tick(); await tick(); ctx.localStorage.store["camera-wall-card:live-boxes"] = "1"; w._ltSync(); await tick(); await tick(); w.conn = conn; return w; };
-  let w = await mkw("new"); ok(w.conn.asked.join() === "tracker:local" && w._liveRoot.querySelector(".lsrc").textContent === "Local" && w._lt.mode === "local", "the live view on Local: the local mode is asked for, the chip says Local"); w._closeLive(); w.disconnectedCallback();
-  w = await mkw("old"); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local · older tracker" && w._liveRoot.querySelector(".lsrc").classList.contains("warn") === false, "with an older Protect Tracker the chip says so"); w._closeLive(); w.disconnectedCallback();
-  w = await mkw("down"); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local · engine not running" && w._liveRoot.querySelector(".lsrc").classList.contains("warn"), "its engine not running: on the chip"); w._closeLive(); w.disconnectedCallback();
-  w = await mkw("new"); w.conn.open.get(TR)({ status: "disconnected", mode: "local" }); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local · engine down", "the engine's connection going while watching: on the chip");
-  w.conn.open.get(TR)({ status: "connected", mode: "local", service: true }); ok(w._liveRoot.querySelector(".lsrc").textContent === "Local", "and back"); w._closeLive(); w.disconnectedCallback();
-  ctx.setTimeout = realTimeout; ctx.localStorage.store = {};
 }
 // --- cameras offline, removed from Protect, and newly adopted
 {
@@ -1612,7 +1378,7 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const mkT = async (cfg, { states, live, entities, reject } = {}) => { const open = new Map(); const asked = [];
     const reg = entities || { [E(1)]: ent(1), [E(2)]: ent(2) };
     const mk = (st) => ({ ...hass, entities: reg, states: st, devices: { d1: { name: "One" }, d2: { name: "Two" } },
-      connection: { subscribeMessage: (cb, m) => { asked.push(m.entity); if (reject && reject[m.entity] && !m.type.startsWith("protect_tracker")) return Promise.reject({ code: reject[m.entity] }); if (m.type.startsWith("protect_tracker")) return Promise.reject({ code: "unknown_command" }); open.set(m.entity, cb); return Promise.resolve(() => open.delete(m.entity)); } },
+      connection: { subscribeMessage: (cb, m) => { asked.push(m.entity); if (reject && reject[m.entity]) return Promise.reject({ code: reject[m.entity] }); open.set(m.entity, cb); return Promise.resolve(() => open.delete(m.entity)); } },
       callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: c.live }); if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } });
     const c = new Trk(); c.live = live || { [E(1)]: "p1", [E(2)]: "p2" }; c.setConfig(cfg); c.isConnected = true; c.hass = mk(states || { [E(1)]: UP, [E(2)]: UP }); c.connectedCallback(); await tick(); await tick(); await tick();
     c.open = open; c.asked = asked; c.to = async (st, reg2) => { if (reg2) { for (const k of Object.keys(reg)) delete reg[k]; } const hh = mk(st); if (reg2) hh.entities = reg2; c.hass = hh; await tick(); await tick(); await tick(); }; return c; };
@@ -1725,96 +1491,6 @@ ok(w._built && !w._building, "next good config builds after a failure");
     w2._given = { exclude: ["One"] }; ok(w2._resolve().history_removed === false, "not when some cameras are left out (it can't tell whose a removed one's were)");
     w2._given = { cameras: [{ entity: E(1) }] }; ok(!w2._resolve().history_removed, "nor when the cameras are named"); }
   ctx.setTimeout = realTimeout; ctx.localStorage.store = {};
-}
-// --- a camera whose view moves (pan, tilt, zoom): Protect Tracker says when
-{
-  ctx.document.hidden = false; ctx.localStorage.store = {};
-  const realTimeout = ctx.setTimeout; ctx.setTimeout = (f, ms) => (ms >= 100000 ? { held: true } : realTimeout(f, ms));
-  const real = Date.now; const B = 1_700_000_500_000;
-  // --- the shared live code
-  const lt = new ctx.LiveTracks(); let t = 0;
-  const pk = (tracks, view) => { t += 100; Date.now = () => B + t + 7000; lt.message({ clockWall: B + t, clockStream: 5000 + t, clockStreamRate: 1000, source: "local", snapshot: true, ...(view ? { view } : {}), tracks }); Date.now = real; };
-  const P = (x, extra = {}) => ({ id: "L1", coord: [x, 300, 60, 180], objectType: "person", local: true, moving: true, stationary: false, ...extra });
-  const V = (x, id = "L2") => ({ id, coord: [x, 500, 100, 60], objectType: "vehicle", local: true, moving: true, stationary: false });
-  const F = (x) => ({ id: "L1:face", coord: [x + 15, 310, 30, 40], objectType: "face", of: "L1", local: true });
-  for (let k = 0; k < 10; k++) pk([P(100 + k * 5), V(400 + k * 5), F(100 + k * 5)], "steady");
-  ok(lt.view === "steady" && lt.tracks.size === 3 && lt.viewN === 0, "packets saying 'steady': nothing out of the ordinary");
-  const carried = ctx.LiveTracks.at(lt.tracks.get("L2"), lt.latest + 200);
-  ok(!!carried && carried[0] > 445, "(at rest, a thing whose next report is late is carried on as it was moving)");
-  // the view starts to move: told at once, between packets
-  lt.message({ status: "view", view: "moving" });
-  ok(lt.view === "moving" && lt.viewN === 1, "the status message says the view is moving: taken at once, without waiting for a packet");
-  ok(!lt.tracks.has("L2") && lt.tracks.has("L1") && lt.tracks.has("L1:face"), "what is not a person is dropped there and then (nothing of it is carried on); the person held, and their face, are kept");
-  const last = lt.tracks.get("L1").pts.at(-1);
-  ok(ctx.LiveTracks.at(lt.tracks.get("L1"), last[0] + 50)[0] === last[1] && ctx.LiveTracks.at(lt.tracks.get("L1"), last[0] + 200) === null, "the held person's box is only where a report put it: not carried on past its last report");
-  // packets while moving: the person gets fresh boxes; nothing else is taken up; no "moved" is read from it
-  const movedBefore = lt.tracks.get("L1").moved;
-  for (let k = 0; k < 10; k++) pk([P(600 - k * 40), V(100 + k * 50, "L9")], "moving");
-  ok(lt.tracks.get("L1").pts.at(-1)[1] === 240 && !lt.tracks.has("L9"), "while it moves: the person's fresh boxes are taken; anything else in a packet is not taken up");
-  ok(lt.tracks.get("L1").moved === movedBefore && lt.tracks.get("L1").strict === true, "and a box crossing the picture is not read as the thing moving (the camera is)");
-  const mid = ctx.LiveTracks.at(lt.tracks.get("L1"), lt.latest - 50); ok(Math.abs(mid[0] - 260) < 0.01, "(between two fresh reports the box is where it belongs, as ever)");
-  // at rest again
-  pk([P(240)], "steady");
-  ok(lt.view === "steady" && lt.viewN === 2 && lt.tracks.has("L1") && lt.tracks.get("L1").strict === false && lt.tracks.get("L1").went === 0, "the view comes to rest: the held person is kept, their memory of where they rested and when they moved begun afresh");
-  // a packet without the word (an older engine, or Protect's own feed) means steady
-  const old = new ctx.LiveTracks(); old.message({ status: "view", view: "moving" }); Date.now = () => B + 7000; old.message({ clockWall: B, tracks: [] }); Date.now = real;
-  ok(old.view === "steady", "a packet that doesn't say: steady");
-  // everything let go at rest when nobody is held
-  const none = new ctx.LiveTracks(); Date.now = () => B + 7100; none.message({ clockWall: B + 100, view: "steady", tracks: [V(100, "a"), { id: "pp", coord: [1, 1, 50, 50], objectType: "person" }] });
-  Date.now = () => B + 12000; none.message({ clockWall: B + 5000, view: "moving", tracks: [] }); none.message({ clockWall: B + 5100, view: "steady", tracks: [] }); Date.now = real;
-  ok(none.tracks.size === 0, "someone last reported long before is not 'held': at rest, everything from before is let go (ids are new)");
-
-  // --- the tracking card
-  const TR = "protect_tracker/live/subscribe"; const E1 = "camera.p_high_resolution_channel";
-  const mkc = async (cfg) => { let push = null;
-    const h = { ...hass, entities: { [E1]: { device_id: "d1", platform: "unifiprotect" } }, states: { [E1]: { entity_id: E1, state: "recording", attributes: { channel_id: 0 } } }, devices: { d1: { name: "Front" } },
-      connection: { subscribeMessage: (cb, m) => { if (m.type !== TR) return Promise.reject({ code: "unknown_command" }); push = cb; return Promise.resolve(() => {}); } },
-      callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { [E1]: "p1" } }); if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
-    const c = new Trk(); c.setConfig({ linger: 2, source: "local", ...cfg }); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick();
-    Object.assign(c._root.querySelector(".frame"), { clientWidth: 1000, clientHeight: 562 });
-    c.T0 = Date.now(); c.T = 0; c.chimes = 0; const rc = c._chime.bind(c); c._chime = () => { c.chimes++; return rc(); };
-    const at = (f) => { Date.now = () => c.T0 + c.T; try { return f(); } finally { Date.now = real; } };
-    c.status = (m) => at(() => push(m));
-    c.step = (tracks, view) => { c.T += 100; at(() => { push({ clockWall: c.T0 + c.T - 30, clockStream: 9000 + c.T, clockStreamRate: 1000, mode: "local", source: "local", snapshot: true, ...(view ? { view } : {}), tracks }); const a = c._active; if (a) { a.placeAt = 0; a.view.at = a.view.at ? c.T0 + c.T - 100 : 0; c._frame(a); } }); };
-    c.run = (ms, f, view) => { for (let end = c.T + ms; c.T < end; ) c.step(f(c.T + 100), view); }; return c; };
-  const pan = (c) => c._root.querySelector(".chip.pan"); const txt = (c) => c._root.querySelector(".idle span").textContent;
-  const Pp = (x, id = "L1") => ({ id, coord: [x, 300, 60, 180], objectType: "person", local: true, moving: true, stationary: false, confirmed: true });
-  // standing by, the camera starts to move with a person in view: no wake, no sound, a quiet mark
-  let c = await mkc({ sound: "ping" }); c.run(300, () => [], "steady");
-  ok(pan(c).hidden !== false && txt(c) === "Watching for people", "tracking card, camera at rest: no mark");
-  c.status({ status: "view", view: "moving" });
-  ok(pan(c).hidden === false && /camera moving$/.test(txt(c)), "the camera starts to move: a small 'camera moving' mark, at once");
-  c.run(2000, (tt) => [Pp(100 + tt * 0.4)], "moving");
-  ok(!c._active && c.chimes === 0, "someone crossing the picture because the camera is moving: the card isn't woken, and makes no sound");
-  c.run(300, () => [], "steady"); ok(pan(c).hidden === true && txt(c) === "Watching for people", "at rest again: the mark goes");
-  c.run(600, (tt) => [Pp(300 + tt * 0.05, "L7")], "steady"); ok(!!c._active && c._active.subject === "L7" && c.chimes === 1, "then someone really there: woken as usual, one sound");
-  // following, and the camera moves with them
-  c.run(1500, (tt) => [Pp(300 + tt * 0.05, "L7"), { id: "L8", coord: [700, 500, 100, 60], objectType: "vehicle", local: true, moving: true, stationary: false }], "steady");
-  c.status({ status: "view", view: "moving" });
-  c.run(3000, (tt) => [Pp(500 - (tt % 1000) * 0.3, "L7")], "moving");
-  ok(!!c._active && c._active.subject === "L7" && c.chimes === 1 && pan(c).hidden === false, "the camera pans while following: the person stays the subject though their box goes right across the picture (no 'jumped', no 'lost'), and no sound");
-  ok(!c._active.sub.lt.tracks.has("L8"), "(what wasn't a person was dropped when the move began)");
-  // ... even when the person isn't reported for longer than the linger while it moves
-  c.run(4000, () => [], "moving");
-  ok(!!c._active, "nothing reported for 4 s while the camera moves (linger is 2 s): not taken for 'nobody there', the card doesn't stand by");
-  // at rest with the person still held
-  c.run(300, (tt) => [Pp(420, "L7")], "moving"); c.run(500, (tt) => [Pp(420 + (tt % 300) * 0.05, "L7")], "steady");
-  ok(c._active.subject === "L7" && c._active.spots.size === 0 && pan(c).hidden === true && c.chimes === 1, "the camera comes to rest with them still held: still the subject, what was remembered of the old view cleared, no sound");
-  // at rest with nobody held: the next thing is taken up at once; then standby after the linger
-  c.status({ status: "view", view: "moving" }); c.run(2000, () => [], "moving"); c.run(100, () => [], "steady");
-  ok(!!c._active && c._active.subject === null, "comes to rest with nobody held: the old subject is forgotten (its id means nothing now)");
-  c.run(600, (tt) => [Pp(200 + tt * 0.05, "L20")], "steady"); ok(c._active.subject === "L20" && c.chimes === 1, "someone new is taken up at once (and the card, never having stood by, doesn't sound again)");
-  c.run(4000, () => [], "steady"); ok(!c._active, "nobody for longer than the linger, the camera at rest: standing by, as ever");
-  c.disconnectedCallback();
-  // an engine that says nothing of the view: all as before
-  c = await mkc({}); c.run(600, (tt) => [Pp(300 + tt * 0.05)]); ok(!!c._active && pan(c).hidden !== false && c._active.sub.lt.view === "steady", "an engine that doesn't say: steady, and the card as it always was"); c.disconnectedCallback();
-
-  // --- the wall's live boxes
-  { const w = new Wall(); w._liveRoot = new El(); const btn = w._liveRoot.querySelector(".lbox"); const l2 = Object.assign(new ctx.LiveTracks(), { els: new Map() });
-    w._ltMessage(l2, { status: "view", view: "moving" }); ok(l2.view === "moving" && btn.getAttribute("data-view") === "moving", "wall live view: the camera starts to move: said on the Boxes button, at once");
-    Date.now = () => B + 7000; w._ltMessage(l2, { clockWall: B, view: "steady", tracks: [] }); Date.now = real; ok(!btn.hasAttribute("data-view"), "at rest: the mark goes");
-    const css = fs.readFileSync(FRONTEND + "camera-wall-card.js", "utf8"); ok(/\.lbox\[data-view\]::after \{ content: " · camera moving"/.test(css), "(the mark is a quiet word after 'Boxes')"); }
-  ctx.setTimeout = realTimeout; Date.now = real; ctx.localStorage.store = {};
 }
 // --- the tracking card's "Last seen", from the integration's record
 {
@@ -2077,159 +1753,6 @@ ok(w._built && !w._building, "next good config builds after a failure");
   const css = fs.readFileSync(FRONTEND + "protect-tracking-card.js", "utf8");
   ok(/\.frame\.warmlive:not\(\.active\) \.snap \{[^}]*visibility: hidden/.test(css) && /\.frame\.warmlive:not\(\.active\) \.zoomer \{ opacity: \.55/.test(css) && /\.frame\.warmlive\.s-none:not\(\.active\) \.zoomer \{ opacity: 1/.test(css), "live standing by: the still is put away and the picture dimmed (not dimmed with standby: none)");
   ok(css.indexOf(".frame.warmlive.s-none .idle {") > css.indexOf(".frame.s-none .idle {"), "(the rule for standby: none comes after the one it changes)");
-}
-// --- whose positions: Protect's own, or the Protect Tracker integration's
-{
-  ctx.document.hidden = false; ctx.localStorage.store = {};
-  const TR = "protect_tracker/live/subscribe", PR = "protect_detections/live/subscribe";
-  // a Home Assistant whose connection knows the commands in `have`, and timers that are fired by hand
-  const realTimeout = ctx.setTimeout; const later = [];
-  ctx.setTimeout = (f, ms) => (ms >= 100000 ? (later.push({ f, ms }), { later: f }) : realTimeout(f, ms));
-  const realClear = ctx.clearTimeout; ctx.clearTimeout = (t) => (t && t.later ? later.splice(later.findIndex((x) => x.f === t.later) >>> 0, t.later && later.some((x) => x.f === t.later) ? 1 : 0) : realClear(t));
-  const fire = async () => { const all = later.splice(0); for (const x of all) x.f(); await tick(); };
-  const mkConn = (have) => { const c = { have: new Set(have), open: new Map(), log: [], L: new Set(),
-    subscribeMessage(cb, m) { c.log.push(m.type); if (!c.have.has(m.type)) return Promise.reject({ code: "unknown_command" }); c.open.set(m.type, cb); return Promise.resolve(() => { c.log.push("stop " + m.type); c.open.delete(m.type); }); },
-    addEventListener(t, f) { if (t === "ready") c.L.add(f); }, removeEventListener(t, f) { c.L.delete(f); } }; return c; };
-  const run = async (have, source) => { const conn = mkConn(have); const got = []; const states = []; const stop = ctx.subscribeLive({ connection: conn }, "camera.x", source, (m) => got.push(m), (st) => states.push(st.using + (st.code ? ":" + st.code : ""))); await tick(); return { conn, got, states, stop }; };
-  ok(ctx.LIVE_SOURCES.join() === "auto,local,protect", "source: auto, local or protect");
-  // auto, Protect Tracker there
-  let r = await run([TR, PR], "auto");
-  ok(r.conn.log.join() === TR && r.states.join() === "tracker" && later.length === 0, "auto: Protect Tracker is installed, so it is listened to (and nothing else)");
-  r.conn.open.get(TR)({ clockWall: 1, source: "local", tracks: [] }); ok(r.got.length === 1, "its messages come through");
-  r.stop(); ok(r.conn.log.join() === [TR, "stop " + TR].join() && r.conn.L.size === 0, "stopped: unsubscribed, nothing left behind");
-  r.conn.open.set(TR, () => {}); ok(r.got.length === 1, "(and nothing more is passed on)");
-  // auto, no Protect Tracker: Protect's own, and it is looked for again
-  r = await run([PR], "auto");
-  ok(r.conn.log.join() === [TR, PR].join() && r.states.join() === "protect" && later.length === 1 && later[0].ms >= 100000, "auto without Protect Tracker: Protect's own positions, and Protect Tracker is looked for again later");
-  await fire(); ok(r.conn.log.join() === [TR, PR, TR].join() && r.states.join() === "protect" && r.conn.open.has(PR) && later.length === 1, "looked for and still not there: Protect's own carries on untouched");
-  r.conn.have.add(TR); await fire();
-  ok(r.conn.log.join() === [TR, PR, TR, TR, "stop " + PR].join() && r.states.join() === "protect,tracker" && r.conn.open.has(TR) && !r.conn.open.has(PR) && later.length === 0, "installed meanwhile: picked up without a reload, and Protect's own is let go");
-  // the connection comes back (Home Assistant restarted) without Protect Tracker
-  r.conn.have.delete(TR); r.conn.open.clear(); for (const f of [...r.conn.L]) f(); await tick();
-  ok(r.states.join() === "protect,tracker,protect" && r.conn.open.has(PR) && later.length === 1, "connection back and Protect Tracker gone: Protect's own again");
-  r.stop(); ok(later.length === 0 && !r.conn.open.has(PR), "stopped: no timer left");
-  // protect: never asks for the tracker
-  r = await run([TR, PR], "protect"); ok(r.conn.log.join() === PR && r.states.join() === "protect", "protect: Protect's own, Protect Tracker not asked"); r.stop();
-  r = await run([], "protect"); ok(r.states.join() === "null:unknown_command" && later.length === 0, "protect, and this integration's relay missing: said"); r.stop();
-  // local: by name
-  r = await run([PR], "local");
-  ok(r.conn.log.join() === TR && r.states.join() === "null:unknown_command" && later.length === 1, "local without Protect Tracker: said (no silent switch to Protect's), and looked for again");
-  r.conn.have.add(TR); await fire(); ok(r.states.join() === "null:unknown_command,tracker", "and used once it is there"); r.stop();
-  r = await run([], "auto"); ok(r.states.join() === "null:unknown_command", "auto with neither: said"); r.stop(); later.length = 0;
-  r = await run([TR, PR], "nonsense"); ok(r.states.join() === "tracker", "(an unknown source in the shared code counts as auto)"); r.stop();
-
-  // --- what a message says about its source
-  const lt = new ctx.LiveTracks();
-  lt.message({ clockWall: 1000, source: "local", tracks: [{ id: "a", coord: [1, 2, 3, 4], objectType: "person", local: true }, { id: "b", coord: [5, 6, 7, 8], objectType: "vehicle" }] });
-  ok(lt.source === "local" && lt.tracks.get("a").local === true && lt.tracks.get("b").local === false && /boxes: local \(Protect Tracker\)/.test(lt.describe(0)), "a message says who made its positions, and which things the local model made");
-  lt.message({ clockWall: 1250, source: "protect", tracks: [] }); ok(lt.source === "local", "one of Protect's in between (they come mixed): still local, the mark doesn't flicker");
-  lt.localAt = Date.now() - 3000; ok(lt.source === "protect" && /boxes: Protect's/.test(lt.describe(0)), "no local ones for a few seconds: Protect's, passed on by Protect Tracker");
-  ok(new ctx.LiveTracks().describe(0).indexOf("boxes:") < 0, "this integration's own messages say nothing about it, and nothing is claimed");
-
-  // --- thirty reports a second
-  const fast = new ctx.LiveTracks(); const C0 = 1_700_000_000_000; const real = Date.now;
-  let n = 0; const t0 = performance.now();
-  for (let c = C0; c <= C0 + 60000; c += 33) { n++; Date.now = () => c + 400; fast.message({ clockWall: c, clockStream: c - 9, clockStreamRate: 1000, source: "local", tracks: [{ id: "v", coord: [100 + 0.01 * (c - C0) + (n % 2 ? 2 : -2), 400, 60, 40], objectType: "vehicle", local: true }] }); }
-  Date.now = real; const took = performance.now() - t0;
-  const pts = fast.tracks.get("v").pts;
-  ok(pts.length <= 30000 / 33 + 3 && pts[0][0] >= C0 + 60000 - 30000 - 33, `a minute at camera frame rate: only the last 30 s kept (${pts.length} positions)`);
-  ok(took < 1500, `and taking them in costs little (${Math.round(took)} ms for ${n} messages)`);
-  const lastC = pts[pts.length - 1][0]; const mid = Wall._ltAt(fast.tracks.get("v"), lastC - 1000 + 16);
-  ok(Math.abs(mid[0] - (100 + 0.01 * (lastC - 1000 + 16 - C0))) <= 2.1, "between two reports a frame apart: in between");
-  const ahead = Wall._ltAt(fast.tracks.get("v"), lastC + 300);
-  ok(Math.abs(ahead[0] - (100 + 0.01 * (lastC + 300 - C0))) < 6, `past the newest report it carries on at its real pace, the wobble between two frames not blown up (${(ahead[0] - (100 + 0.01 * (lastC + 300 - C0))).toFixed(1)} off)`);
-  const t1 = performance.now(); for (let k = 0; k < 6000; k++) fast.visible(lastC - 700 - (k % 500)); ok(performance.now() - t1 < 1500, `looking up where things are, a second or so back, stays cheap (${Math.round(performance.now() - t1)} ms for 6000 frames)`);
-
-  // --- as Protect Tracker really sends them: its own a frame apart and here at once, Protect's four a second and half a second late
-  {
-    const m = new ctx.LiveTracks(); const real2 = Date.now; const B = 1_700_000_100_000; // the camera's clock; ours is 2 s ahead of it
-    const sendAt = (ours, pkt) => { Date.now = () => ours; try { m.message(pkt); } finally { Date.now = real2; } };
-    const pos = (c) => 200 + 0.2 * (c - B); const events = [];
-    for (let c = B; c <= B + 4000; c += 33) events.push([c + 2000 - 25, { clockWall: c, clockStream: c - 7, clockStreamRate: 1000, source: "local", tracks: [{ id: "v", coord: [pos(c), 300, 80, 50], objectType: "vehicle", local: true, stationary: false }] }]);
-    // Protect's own box for the same car sits 4 units off, and comes 450 ms after its stamp
-    for (let c = B + 100; c <= B + 4000; c += 250) events.push([c + 2000 + 450, { clockWall: c, clockStream: c - 7, clockStreamRate: 1000, source: "protect", tracks: [{ id: "v", coord: [pos(c) + 4, 300, 80, 50], objectType: "vehicle", stationary: false }, { id: "parked", coord: [800, 500, 90, 60], objectType: "vehicle", stationary: true }] }]);
-    events.sort((x, y) => x[0] - y[0]); let worst = 0; let back = false; let lastX = null; let lastOurs = 0; let clockBack = false; let lastAbout = -Infinity;
-    for (const [ours, pkt] of events) {
-      sendAt(ours, pkt);
-      const pts = m.tracks.get("v").pts; for (let k = 1; k < pts.length; k++) if (pts[k][0] <= pts[k - 1][0]) back = true;
-      // where the box is drawn, for a picture 300 ms behind the camera, right after each message
-      const box = ctx.LiveTracks.at(m.tracks.get("v"), ours - 2000 - 300); if (box && lastX != null) worst = Math.max(worst, Math.abs(box[0] - lastX - 0.2 * (ours - lastOurs))); if (box) { lastX = box[0]; lastOurs = ours; }
-      const about = m.clock.stream + (ours - m.clock.at); if (about < lastAbout - 60) clockBack = true; lastAbout = Math.max(lastAbout, about);
-    }
-    const pts = m.tracks.get("v").pts;
-    ok(!back && pts.length >= 115 && pts.every((q) => Math.abs(q[1] - pos(q[0])) < 0.01), "mixed packets for one thing: its positions stay in order, and Protect's late ones don't displace the newer local ones");
-    ok(worst < 1, `so the box moves evenly, no jump when one of Protect's arrives (furthest from an even pace between two messages: ${worst.toFixed(2)} units)`);
-    ok(!clockBack, "the stream clock kept is the newest stamp's, not set back by a late packet");
-    ok(Math.abs(m.gap - (2000 + 450)) < 2, "our clock against the camera's is taken from Protect's own packets while there are any (the local ones are here at once)");
-    ok(m.tracks.get("parked").local === false && m.tracks.get("v").local === true, "which things the local model made is kept per thing");
-    // only local packets (nothing of Protect's of late): allowed for
-    const only = new ctx.LiveTracks(); for (let c = B; c <= B + 1000; c += 33) { Date.now = () => c + 2000 - 35; only.message({ clockWall: c, source: "local", tracks: [] }); } Date.now = real2;
-    ok(Math.abs(only.gap - (2000 + 330)) < 2, "only local packets: the same answer, their being here at once allowed for");
-    // faces
-    const f = new ctx.LiveTracks(); const pk = (c, tracks) => f.message({ clockWall: c, source: "local", tracks });
-    for (let c = B; c <= B + 1000; c += 100) pk(c, [{ id: "p1", coord: [400, 300, 80, 240], objectType: "person", local: true }, { id: "p1:face", coord: [425, 310, 30, 40], objectType: "face", of: "p1", local: true }, { id: "p9:face", coord: [100, 100, 30, 40], objectType: "face", of: "p9", local: true }, { id: "f7", coord: [700, 200, 30, 40], objectType: "face" }]);
-    const vis = f.visible(B + 500, true); const ids = vis.map((n) => n.t.id + (n.of ? ">" + n.of : "")).join();
-    ok(ids === "p1,f7,p1:face>p1", "a face found on someone followed comes with them and marked as theirs; one whose person isn't in view is left out; a face Protect reports is a thing as before: " + ids);
-  }
-  // --- the tracking card
-  const reg = { "camera.p_high_resolution_channel": { device_id: "d1", platform: "unifiprotect" } };
-  const states = { "camera.p_high_resolution_channel": { entity_id: "camera.p_high_resolution_channel", state: "recording", attributes: { channel_id: 0 } } };
-  const P = "camera.p_high_resolution_channel";
-  const mkc = async (cfg, have) => { const conn = mkConn(have);
-    const h = { ...hass, entities: reg, states, devices: { d1: { name: "Front" } }, connection: conn,
-      callWS: (m) => { if (m.type.endsWith("/live/cameras")) return Promise.resolve({ cameras: { [P]: "p1" } }); if (m.type === "auth/sign_path") return Promise.resolve({ path: "/s" }); return new Promise(() => {}); } };
-    const c = new Trk(); c.setConfig(cfg); c.isConnected = true; c.hass = h; c.connectedCallback(); await tick(); await tick(); c.conn = conn; return c; };
-  const person = (extra = {}) => ({ clockWall: Date.now() - 400, tracks: [{ id: "p", coord: [400, 400, 60, 160], objectType: "person" }], ...extra });
-  const chip = (c) => c._root.querySelector(".chip.src");
-  const note = (c) => c._root.querySelector(".idle .note").textContent;
-  let threw = false; try { new Trk().setConfig({ source: "gpu" }); } catch (e) { threw = true; } ok(threw, "tracking card: an unknown source is refused");
-  // nothing said, no Protect Tracker: exactly as before
-  let c = await mkc({}, [PR]);
-  ok(c.conn.open.has(PR) && !c._state && note(c) === "", "tracking card, no Protect Tracker: Protect's own positions, nothing said about it");
-  c.conn.open.get(PR)(person()); Object.assign(c._root.querySelector(".frame"), { clientWidth: 800, clientHeight: 450 }); c._active.placeAt = 0; c._frame(c._active);
-  ok(!!c._active && chip(c).hidden === true, "following, and no mark: there is no choice to show");
-  c.disconnectedCallback(); ok(later.length === 0 && c.conn.open.size === 0, "off the page: everything stopped, the looking-again too");
-  // Protect Tracker installed
-  c = await mkc({}, [TR, PR]);
-  ok(c.conn.open.has(TR) && !c.conn.open.has(PR), "tracking card with Protect Tracker installed: it is used by itself");
-  c.conn.open.get(TR)(person({ source: "local" })); c._active.placeAt = 0; c._frame(c._active);
-  ok(!!c._active && chip(c).hidden === false && chip(c).textContent === "local", "a person from the local model: followed, marked 'local'");
-  c.conn.open.get(TR)(person({ source: "protect" })); c._active.placeAt = 0; c._frame(c._active); ok(chip(c).textContent === "local", "one of Protect's packets in between: the mark stays");
-  c._active.sub.lt.localAt = Date.now() - 3000; c._active.placeAt = 0; c._frame(c._active);
-  ok(chip(c).textContent === "Protect" && /passed on by Protect Tracker/.test(chip(c).title), "Protect Tracker falling back to Protect's positions: marked 'Protect'");
-  c._config.live_debug = true; c._active.placeAt = 0; c._frame(c._active); ok(/boxes: Protect's/.test(c._root.querySelector(".dbg").textContent), "and live_debug says it as well");
-  c.disconnectedCallback();
-  // told by name
-  // faces from Protect Tracker: with their person, never by themselves
-  c = await mkc({}, [TR, PR]); const face = (of) => ({ id: of + ":face", coord: [415, 410, 30, 40], objectType: "face", of, local: true });
-  c.conn.open.get(TR)({ clockWall: Date.now() - 20, source: "local", tracks: [face("p")] });
-  ok(!c._active, "a face by itself (its person not reported): the card stays standing by");
-  ctx.localStorage.store = {}; let writes = 0; const realSet = ctx.localStorage.setItem; ctx.localStorage.setItem = function (k, v) { writes++; return realSet.call(this, k, v); };
-  let plays = 0; c._chime = () => plays++;
-  for (let k = 0; k < 60; k++) c.conn.open.get(TR)({ clockWall: Date.now() - 20 + k, source: "local", tracks: [{ id: "p", coord: [400, 400, 60, 160], objectType: "person", local: true }, face("p")] });
-  ok(!!c._active && plays === 1 && writes === 1, "sixty reports of one person in two seconds' worth: woken once, sounded once, remembered once (not sixty times)");
-  ctx.localStorage.setItem = realSet;
-  { const a = c._active; const real3 = Date.now; const now3 = real3(); Date.now = () => now3 + 300; a.placeAt = 0; a.view.at = 0; try { c._frame(a); } finally { Date.now = real3; }
-    ok(a.els.size === 2 && a.els.get("p").className.startsWith("box main") && a.els.get("p:face").className === "box part", "the face is boxed with its person");
-    ok(c._root.querySelector(".info").children.length === 1 && /^Person/.test(c._root.querySelector(".info").children[0].textAll), "and is not counted or named as a thing of its own"); }
-  c.disconnectedCallback();
-  c = await mkc({ types: ["face"] }, [TR, PR]); c.conn.open.get(TR)({ clockWall: Date.now() - 20, source: "local", tracks: [{ id: "f7", coord: [400, 400, 30, 40], objectType: "face" }] });
-  ok(!!c._active, "a card told to watch faces still wakes for a face Protect reports"); c.disconnectedCallback();
-  c = await mkc({ show_others: true, types: ["vehicle"] }, [TR, PR]); let blips = 0; const realBlips = c._blips.bind(c); c._blips = (t) => { blips++; return realBlips(t); };
-  for (let k = 0; k < 30; k++) c.conn.open.get(TR)({ clockWall: Date.now() - 20 + k, source: "local", tracks: [{ id: "p", coord: [400, 400, 60, 160], objectType: "person", local: true }, face("p")] });
-  ok(!c._active && blips === 1, "other things as dots while standing by: drawn at a steady pace, not once a packet"); c.disconnectedCallback();
-  c = await mkc({ source: "protect" }, [TR, PR]); ok(c.conn.open.has(PR) && !c.conn.open.has(TR), "source: protect leaves Protect Tracker alone");
-  c.conn.open.get(PR)(person()); c._active.placeAt = 0; c._frame(c._active); ok(chip(c).hidden === false && chip(c).textContent === "Protect", "and the mark shows the choice made"); c.disconnectedCallback();
-  c = await mkc({ source: "local" }, [TR, PR]);
-  c.conn.open.get(TR)(person({ source: "protect" })); ok(!c._active, "source: local: a person only Protect reports doesn't wake it (local means the model's own)");
-  c.conn.open.get(TR)({ clockWall: Date.now() - 20, source: "local", tracks: [{ id: "q", coord: [400, 400, 60, 160], objectType: "person", local: true }] }); ok(!!c._active, "one the model made does");
-  c.disconnectedCallback();
-  c = await mkc({ source: "local" }, [PR]);
-  ok(!c._state && /Protect Tracker isn't installed/.test(note(c)) && !c.conn.open.has(PR) && later.length === 1, "source: local without Protect Tracker: the card says so (and doesn't quietly use Protect's)");
-  c.conn.have.add(TR); await fire(); ok(note(c) === "" && c.conn.open.has(TR), "once it is installed: the note goes and it is used");
-  c.disconnectedCallback();
-  c = await mkc({}, []); ok(c._state === "norelay", "neither there: as before, it says the integration is needed"); c.disconnectedCallback();
-  later.length = 0; ctx.setTimeout = realTimeout; ctx.clearTimeout = realClear; ctx.localStorage.store = {};
 }
 // --- tracking tiles on the wall
 {
@@ -2632,11 +2155,6 @@ ok(w._built && !w._building, "next good config builds after a failure");
   done.rej({ code: "failed", message: "UniFi Protect did not take the command" }); await soon();
   ok(texts(w).at(-1) === "UniFi Protect did not take the command" && kids(w).at(-1).className === "err" && !has(btn(w, "p:Home"), "sent") && btn(w, "p:Home").disabled === false, "a failure is said plainly on the bar, and the button does not say sent");
   btn(w, "p:Drive").onclick(); ok(!kids(w).some((c) => c.className === "err"), "the next try clears what was said"); done.res({}); await soon();
-  // the mark that the view is moving is the Boxes button's, and is left alone
-  { const lb = w._liveRoot.querySelector(".lbox"); const lt = Object.assign(new ctx.LiveTracks(), { els: new Map() }); lt.setView("moving"); w._ltPan(lt);
-    btn(w, "p:Gate").onclick(); done.res({}); await soon(); w._ptzSync();
-    ok(lb.hasAttribute("data-view") && has(btn(w, "p:Gate"), "sent"), "with the view moving: 'camera moving' stays beside Boxes while the bar says sent (neither touches the other)");
-    lt.setView("steady"); w._ltPan(lt); ok(!lb.hasAttribute("data-view") && bar(w).hidden === false, "and it goes when the view rests, the bar as it was"); await tick(); }
   // a patrol
   btn(w, "r:Round").onclick(); ok(w.sent.at(-1).type === "protect_detections/ptz/patrol" && w.sent.at(-1).option === "Round" && w.sent.at(-1).entity === "camera.m", "a patrol button asks for that patrol");
   await soon(); ok(has(btn(w, "r:Round"), "sent") && !has(btn(w, "r:Round"), "on"), "sent; which patrol runs is Home Assistant's to say"); await tick();
@@ -2801,5 +2319,55 @@ ok(w._built && !w._building, "next good config builds after a failure");
     ok(!(c._stream("camera.m") instanceof Direct), "and is what is used from then on");
     c.setConfig({ direct_stream: true }); ok(c._directFailed === null && c._stream("camera.m") instanceof Direct, "until the card is set up again"); c.disconnectedCallback(); }
   delete ctx.MediaSource; delete ctx.WebSocket;
+}
+// --- boxes come from Protect only (the local tracker and the `source` option are gone)
+{
+  // listening
+  const mkConn = (fail) => { const c = new Target(); c.asked = []; c.ended = 0; c.push = null;
+    c.subscribeMessage = (cb, m) => { c.asked.push(m); if (fail && fail()) return Promise.reject(fail()); c.push = cb; return Promise.resolve(() => { c.ended++; }); }; return c; };
+  { const conn = mkConn(); const got = []; const states = [];
+    const stop = ctx.subscribeLive({ connection: conn }, "camera.a", (m) => got.push(m), (st) => states.push(st)); await tick();
+    ok(conn.asked.length === 1 && conn.asked[0].type === "protect_detections/live/subscribe" && conn.asked[0].entity === "camera.a" && Object.keys(conn.asked[0]).sort().join() === "entity,type", "listening asks this integration for Protect's positions, and nothing else of anyone");
+    ok(states.length === 1 && states[0].using === "protect", "and says so once it is listening");
+    conn.push({ clockWall: 1 }); ok(got.length === 1, "messages are passed on");
+    const first = conn.push; conn.dispatchEvent(new Ev("ready")); await tick();
+    ok(conn.asked.length === 2 && conn.ended === 1 && states.length === 2, "the connection to Home Assistant came back: asked again, the old one let go");
+    first({ clockWall: 2 }); ok(got.length === 1, "(what the old one still says is not passed on)");
+    await new Promise((r) => setTimeout(r, 30)); ok(conn.asked.length === 2, "nothing else is looked for now and then");
+    stop(); conn.push({ clockWall: 3 }); ok(conn.ended === 2 && got.length === 1 && conn.count("ready") === 0, "stopped: let go, and silent"); }
+  { let err = { code: "camera_removed" }; const conn = mkConn(() => err); const states = [];
+    const stop = ctx.subscribeLive({ connection: conn }, "camera.a", () => {}, (st) => states.push(st)); await tick();
+    ok(states.length === 1 && states[0].using === null && states[0].code === "camera_removed" && conn.asked.length === 1, "it cannot be started: said with why, once"); stop(); }
+  ok(ctx.subscribeLive.length === 3 && typeof ctx.LIVE_SOURCES === "undefined", "(there is no source to choose any more)");
+  // a packet with what the local tracker used to add: taken as any other
+  { const lt = new ctx.LiveTracks(); const now = Date.now();
+    lt.message({ status: "view", view: "moving" });
+    lt.message({ arrived: now, clockWall: now - 400, clockStream: 5000, clockStreamRate: 1000, view: "moving", mode: "local", source: "local", snapshot: true, tracks: [
+      { id: "L1", coord: [100, 100, 50, 80], objectType: "vehicle", local: true, confirmed: false, moving: true }, { id: "L1:face", coord: [110, 105, 10, 12], objectType: "face", of: "L1" }] });
+    lt.message({ arrived: now + 250, clockWall: now - 150, clockStream: 5250, clockStreamRate: 1000, snapshot: true, tracks: [] });
+    const t = lt.tracks.get("L1");
+    ok(lt.tracks.size === 2 && t.type === "vehicle" && !("local" in t) && !("confirmed" in t) && !("strict" in t) && !("of" in t) && !("end" in t), "a packet carrying the old tracker's extra words: its things are taken as Protect's, the words left aside");
+    ok(!("view" in lt) && !("mode" in lt) && typeof lt.setView === "undefined" && !("quiet" in lt) && !("source" in lt), "(the box code keeps nothing about a view moving, a mode or a maker)");
+    ok(lt.visible(now - 400, true).length === 2 && lt.visible(now - 400, true).every((n) => !("of" in n)) && ctx.LiveTracks.at(t, now - 200) !== null, "everything reported is a thing of its own, and one not in a later packet is held as usual"); }
+  // configurations from before
+  { const live = { "camera.m": "cam1" }; const types = [];
+    const hs = { ...hass, entities: { "camera.m": { device_id: "d", platform: "unifiprotect" } }, devices: { d: { name: "M" } }, states: { "camera.m": { entity_id: "camera.m", state: "recording", attributes: { channel_id: 1 } } },
+      connection: { subscribeMessage: (cb, m) => { types.push(m.type); return Promise.resolve(() => {}); } }, callWS: (m) => (m.type.endsWith("/live/cameras") ? Promise.resolve({ cameras: live }) : new Promise(() => {})) };
+    for (const source of ["local", "auto", "protect", "nonsense", 7]) {
+      let threw = false; const c = new Trk(); try { c.setConfig({ source }); } catch (e) { threw = true; }
+      c.isConnected = true; c.hass = hs; c.connectedCallback(); await tick(); await tick();
+      ok(!threw && c._state !== "error" && !c._note && c._subs.size === 1, `a tracking card stored with source: ${source}: no error and nothing said, it just listens`); c.disconnectedCallback(); }
+    ok(types.length === 5 && types.every((t) => t === "protect_detections/live/subscribe"), "and only ever to Protect's positions");
+    const c = new Trk(); c.setConfig({}); c.isConnected = true; c.hass = hs; c.connectedCallback(); await tick(); await tick();
+    ok(!/chip src|chip pan|camera moving/.test(c._root.innerHTML), "the card has no mark for whose positions these are, nor for a camera moving"); c.disconnectedCallback();
+    const form = Trk.getConfigElement(); form.hass = hs; form.setConfig({ type: "custom:protect-tracking-card", source: "local" });
+    ok(!("source" in Trk.editDefaults), "the tracking card's editor no longer offers it");
+    const w = new Wall(); let wthrew = false; try { w.setConfig({ cameras: [{ entity: "camera.m" }], source: "local", alarm: false, history: false, tracking: { source: "local", types: ["person"] } }); } catch (e) { wthrew = true; }
+    ok(!wthrew && !("source" in Wall.editDefaults) && !("source" in w._trackConfig({ key: "t:camera.m", base: { types: ["person"] } })), "a wall stored with source: no error; it is not in the wall's editor, and not handed on to its tracking tiles");
+    w._arr = { opts: { "t:camera.m": { source: "local", linger: 5 } } }; let tthrew = false; try { new Trk().setConfig(w._trackConfig({ key: "t:camera.m", base: { types: ["person"] } })); } catch (e) { tthrew = true; }
+    ok(!tthrew, "a tile whose saved options still say source: taken without a word"); }
+  // nothing of it is left in what the browser is sent
+  { const left = []; for (const f of fs.readdirSync(FRONTEND)) { const src = fs.readFileSync(FRONTEND + f, "utf8"); if (/protect_tracker|Protect Tracker|autoLocal|LIVE_SOURCES|lsrc|camera moving|localOnly/.test(src)) left.push(f); }
+    ok(left.length === 0, "no card file talks to, or of, the local tracker: " + (left.join() || "none")); }
 }
 console.log(fails ? `${fails} FAILED` : "all passed"); process.exit(fails ? 1 : 0);
